@@ -28,6 +28,8 @@ Potrebuje `wss://`. Dve cesty:
   `docker run -d --restart=always -p 127.0.0.1:8790:8790 rx-bridge`, pred tim
   Caddy s `Caddyfile` (doplnit domenu). Do loaderu patří `wss://<domena>/`.
 
+Aktualne to bezi na Dokploy (152.53.160.54) jako `wss://rx-bridge.152.53.160.54.sslip.io/`.
+
 ## Provoz
 
 - Jeden uzivatel = jedno WS spojeni = jedno TCP do poolu. Pool ma limity na IP.
