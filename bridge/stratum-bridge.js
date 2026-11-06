@@ -109,6 +109,15 @@ function onConnection(socket) {
 		const request = head.subarray(0, end).toString("latin1");
 		const rest = head.subarray(end + 4);
 		const key = /sec-websocket-key:\s*(\S+)/i.exec(request)?.[1];
+		if (!/upgrade:\s*websocket/i.test(request)) {
+			// bezny HTTP pozadavek (health check, prohlizec) — proste odpovez
+			const body = "stratum bridge\n";
+			socket.end(
+				"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" +
+					`Content-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`,
+			);
+			return;
+		}
 		log("ws client connected" + (key ? "" : " (bez key)"));
 		if (!key) log("handshake:", request.split("\r\n")[0]);
 		const accept = crypto.createHash("sha1").update((key || "") + WS_GUID).digest("base64");

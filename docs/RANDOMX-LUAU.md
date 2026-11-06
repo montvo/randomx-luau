@@ -205,3 +205,17 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
   proslo `ws` serverem, a `syn.websocket.connect` blokuje do dokonceni handshake.
 - Executor ma maly limit soucasnych websocketu; kdyz zustanou viset stare
   instance, dalsi `syn.websocket.connect` se uz nevrati. Reseni: rejoin.
+
+## 12. Hosting bridge na serveru (Dokploy)
+
+Bridge bezi na `152.53.160.54` v Dokploy (projekt `rx-bridge`, aplikace `bridge`,
+zdroj = drop zip s `bridge/Dockerfile` + `stratum-bridge.js`). Verejna adresa je
+`wss://rx-bridge.152.53.160.54.sslip.io/` (sslip.io resolvuje na IP, certifikat
+resi Traefik/Let's Encrypt, port 8790 zustava jen ve vnitrni siti).
+
+Redeploy: `zip -q -r /tmp/bridge.zip Dockerfile stratum-bridge.js` a
+`POST /api/application.dropDeployment` + `POST /api/application.deploy`
+s hlavickou `x-api-key`. Loader ma tuhle URL zapečenou jako primarni.
+
+Bridge odpovida na bezny GET `200 stratum bridge`, aby proslo health check i
+prohlizec; WS handshake jde jen po `Upgrade: websocket`.
