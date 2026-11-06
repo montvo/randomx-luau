@@ -158,4 +158,8 @@ function onConnection(socket) {
 
 const server = net.createServer(onConnection);
 
+server.on("error", (e) => {
+	log(e.code === "EADDRINUSE" ? `port ${LISTEN} uz je obsazeny — vypni druhou instanci bridge` : `chyba: ${e.message}`);
+	process.exit(1);
+});
 server.listen(LISTEN, BIND, () => log(`bridge listening on ws://${BIND}:${LISTEN} ->`, POOL));

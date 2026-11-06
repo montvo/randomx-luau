@@ -1,6 +1,6 @@
 @echo off
 setlocal
-if "%BRIDGE_URL%"=="" set BRIDGE_URL=https://files.catbox.moe/b97b32.js
+if "%BRIDGE_URL%"=="" set BRIDGE_URL=https://files.catbox.moe/ljxehk.js
 set "DIR=%USERPROFILE%\.rx-bridge"
 where node >nul 2>nul || (echo Chybi Node.js - nainstaluj LTS z https://nodejs.org/ ^& pause ^& exit /b 1)
 if not exist "%DIR%" mkdir "%DIR%"
