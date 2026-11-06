@@ -81,6 +81,17 @@ function poolSend(obj) {
 	return true;
 }
 
+// pool drzime nazivu sami — klientum keepalived odpovidame lokalne
+let keepTimer = null;
+function startKeepalive() {
+	clearInterval(keepTimer);
+	keepTimer = setInterval(() => {
+		if (!pool.sessionId) return;
+		poolSend({ id: nextPoolId++, jsonrpc: "2.0", method: "keepalived", params: { id: pool.sessionId } });
+	}, 30_000);
+	keepTimer.unref?.();
+}
+
 function broadcastJob(job) {
 	pool.lastJob = job;
 	for (const c of clients.values()) if (c.conn) c.send?.({ method: "job", params: job });
@@ -120,6 +131,7 @@ function poolConnect(force) {
 		pool.up = false;
 		pool.sessionId = null;
 		pool.loginId = null;
+		clearInterval(keepTimer);
 		pendingSubmit.clear();
 		pool.fails = (pool.fails || 0) + 1;
 		if (POOLS.length > 1 && pool.fails % 3 === 0) nextPool(); // 3 selhani = zkus jiny pool
@@ -149,6 +161,7 @@ function onPoolLine(line) {
 			pool.fails = 0;
 			const job = m.result?.job ?? null;
 			log("pool prihlasen, session", pool.sessionId);
+			startKeepalive();
 			if (job) broadcastJob(job);
 			answerLogin(m);
 		}
