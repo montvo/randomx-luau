@@ -20607,6 +20607,7 @@ local CONFIG = {
 	wallet = "42ypgDkEvE1VQSLfXwQffKBF7L5vETygtfvaynG9nW8W7crvsrGv4ziAAmTppDkedKSdz9iAKM7f5gBwZpnNviY81ACgjhw",
 	worker = "rx-luau",
 	bridge = "ws://127.0.0.1:8790",
+	bridgeFallback = nil, -- druha adresa, zkusi se po selhani prvni
 	pass = "x",
 	-- yield kazdych N instrukci VM (0 = bez yieldovani, cely hash najednou ~8 s)
 	slicePcs = 1024,
@@ -20691,6 +20692,15 @@ local function connect(url)
 		return WebSocket.connect(url)
 	end
 	error("executor neumi WebSocket")
+end
+
+-- primarni bridge, pri selhani se zkusi zalozni (napr. lokalni); primarni se
+-- po par neuspesech zkusi znovu, aby se po restartu serveru vratil
+local useFallback = false
+local fallbackFails = 0
+local function bridgeUrl()
+	if useFallback and CONFIG.bridgeFallback then return CONFIG.bridgeFallback end
+	return CONFIG.bridge
 end
 
 local function log(...)
@@ -20851,7 +20861,7 @@ function M.run(over)
 	if CONFIG.chains then rx._chains = CONFIG.chains end
 	if CONFIG.iters then rx._iters = CONFIG.iters end
 	math.randomseed(os.time() % 100000)
-	log("bridge " .. CONFIG.bridge .. " wallet " .. CONFIG.wallet:sub(1, 12) .. "…")
+	log("bridge " .. bridgeUrl() .. " wallet " .. CONFIG.wallet:sub(1, 12) .. "…")
 
 	while true do
 		stop = false
@@ -20860,7 +20870,7 @@ function M.run(over)
 		cacheKey = nil
 		local ok, err = pcall(function()
 			sessionStart = os.clock()
-			ws = connect(CONFIG.bridge)
+			ws = connect(bridgeUrl())
 			ws.OnMessage:Connect(function(data)
 				local s = tostring(data)
 				if #s > 0 then table.insert(queue, s) end
@@ -20881,7 +20891,22 @@ function M.run(over)
 				end
 			end
 		end)
-		if not ok then log("chyba: " .. tostring(err)) end
+		if not ok then
+			log("chyba: " .. tostring(err))
+			if CONFIG.bridgeFallback then
+				if useFallback then
+					fallbackFails = fallbackFails + 1
+					if fallbackFails >= 3 then
+						fallbackFails = 0
+						useFallback = false
+						log("zkousim znovu primarni bridge")
+					end
+				else
+					useFallback = true
+					log("zkousim zalozni bridge " .. CONFIG.bridgeFallback)
+				end
+			end
+		end
 		pcall(function() ws:Close() end)
 		if CONFIG.maxHashes and done >= CONFIG.maxHashes then
 			log(string.format("konec: %d hashu, %d shares", done, submitted))

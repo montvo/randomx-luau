@@ -1,0 +1,5 @@
+# Caddy obstara TLS i WebSocket, bridge bezi jen na 127.0.0.1:8790.
+# 1) zmen domenu  2) caddy run  3) do loaderu dej wss://<domena>/
+miner.example.com {
+	reverse_proxy 127.0.0.1:8790
+}

