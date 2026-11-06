@@ -217,5 +217,7 @@ resi Traefik/Let's Encrypt, port 8790 zustava jen ve vnitrni siti).
 Redeploy = push do `master` a `POST /api/application.deploy` s hlavickou
 `x-api-key` (nebo zapnout autoDeploy). Loader ma tuhle URL zapečenou jako primarni.
 
-Bridge odpovida na bezny GET `200 stratum bridge`, aby proslo health check i
-prohlizec; WS handshake jde jen po `Upgrade: websocket`.
+Bridge ma na `/` dashboard (pripojeni klienti, souhrn shares, cisla z pool API
+pro vynucenou penizenku) a `/api/stats` s JSONem. Penizenka se vynucuje pres env
+`WALLET` (login klienta se prepise). Bezny GET vraci dashboard/200, WS handshake
+jde jen po `Upgrade: websocket`.

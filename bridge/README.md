@@ -30,6 +30,15 @@ Potrebuje `wss://`. Dve cesty:
 
 Aktualne to bezi na Dokploy (152.53.160.54) jako `wss://rx-bridge.152.53.160.54.sslip.io/`.
 
+## Dashboard
+
+Na `/` bezi prehled: kdo je pripojeny (`id`, IP, agent, vyska jobu, shares),
+souhrn za vsechny klienty a cisla z pool API pro penizenku
+(`--wallet`/`WALLET`, `--stats-api`/`STATS_API`). JSON je na `/api/stats`.
+
+S `--wallet` (nebo env `WALLET`) bridge prepsise `login` kazdeho klienta, takze
+vsechno tezi na jednu adresu; puvodni adresa klienta zustava v dashboardu.
+
 ## Provoz
 
 - Jeden uzivatel = jedno WS spojeni = jedno TCP do poolu. Pool ma limity na IP.
