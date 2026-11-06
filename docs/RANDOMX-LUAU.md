@@ -193,3 +193,15 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
    znovu otestovat throttling poolu.
 2. Výkon: worker pool, time-slicing, UI (7,2 s/hash je na reálné těžení pomalé).
 3. Dočistit testy (`t_mul` bez argumentů, PASS/FAIL u primitivních testů).
+
+## 11. Distribuce (loader + bridge)
+
+- `miner/loader.lua` stahuje `miner.lua` z catboxu a predava `MINER_CFG`; po kazdem
+  rebuildu je potreba `miner.lua` znovu nahrat a URL prebakedovat.
+- `bridge/install.sh|.command|.cmd` stahnou bridge do `~/.rx-bridge` a spusti ho.
+- Bridge je bez zavislosti (vlastni WS handshake nad `node:net`); modul `ws` je
+  nahrazen, protoze na cizich strojich neni.
+- Handshake musi byt vlastni: Opiumware na prvni spojeni neposle nic, co by
+  proslo `ws` serverem, a `syn.websocket.connect` blokuje do dokonceni handshake.
+- Executor ma maly limit soucasnych websocketu; kdyz zustanou viset stare
+  instance, dalsi `syn.websocket.connect` se uz nevrati. Reseni: rejoin.

@@ -18,24 +18,34 @@ Stav: **hash se shoduje s C referencí bit po bitu** — všech 8 chainů × 204
 - `miner/` — `main.lua` (miner logika) + `entry.lua`; `tools/bundle.py` z toho staví
   jednosouborový `miner.lua` pro executor
 
-## Tezba v executoru
+## Tezba
 
-1. Bridge (na stejném stroji jako executor):
+Pro sebe i pro druhe lidi je pripraveny `miner/loader.lua`: stahne aktualni miner,
+nastavi penizenku a spusti ho. Potrebuje ale lokalne bezici bridge, protoze
+executor neumi TCP.
 
-   ```sh
-   node bridge/stratum-bridge.js --pool gulf.moneroocean.stream:10128
-   ```
+1. Bridge (jednou, na stroji s Node.js):
 
-2. V executoru spustit obsah `miner.lua` (peněženka je v `CONFIG.wallet` nahoře).
-   Skript se sám přihlásí, stáhne job, těží a posílá shares.
+   - macOS: dvojklik na `bridge/install.command`
+   - Linux: `sh bridge/install.sh`
+   - Windows: `bridge/install.cmd`
+   - nebo rucne: `node bridge/stratum-bridge.js`
 
-3. Zastavit jde jiným skriptem: `_G.MINER_STOP = true`.
-   Pozor: jeden hash trvá v Robloxu ~18 s (plus ~130 s init cache), zatímco blok sem
-   chodí ~40 s — share proto často skončí jako `Block outdated`.
-   Jiné nastavení (třeba submit každého hashe i pod target): spustit `miner.lua`
-   s `MINER_CFG = { testShares = true }` před ním.
+   Bridge nema zavislosti (jen Node builtiny), stahne se sam a bezi na
+   `ws://127.0.0.1:8790`. Okno nechat otevrene.
 
-`miner.lua` je generovaný — upravuj `miner/main.lua` nebo `src/`, pak `python3
+2. Do executoru vlozit `miner/loader.lua` (nebo jen
+   `loadstring(game:HttpGet("<url>"))()`).
+
+3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:
+   `MINER_CFG = { wallet = "..." }` pred loaderem.
+
+Pozor: jeden hash trva v Robloxu ~18 s (plus ~130 s init cache), blok chodi ~40 s —
+share proto casto skonci jako `Block outdated`. Executor ma taky maly limit
+soucasnych websocketu: kdyz zustanou viset stare instance, dalsi pripojeni se
+nevrati — pomuze rejoin.
+
+je generovaný — upravuj `miner/main.lua` nebo `src/`, pak `python3
 tools/bundle.py` (staví i `miner.test.lua` pro `tests/t_miner.lua`).
 
 ## Spuštění
