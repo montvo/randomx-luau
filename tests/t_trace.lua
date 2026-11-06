@@ -46,7 +46,7 @@ local function b2f(lo,hi) local b=buffer.create(8) buffer.writeu32(b,0,lo) buffe
 local function small(lo,hi) local e = band(rshift(hi,27)+1023, 2047) return b2f(lo, bor(band(hi,0xFFFFF), lshift(e,20))) end
 local alo, ahi = {}, {}
 for i = 0, 3 do alo[i+1] = small(ent[i*2][1], ent[i*2][2]) ahi[i+1] = small(ent[i*2+1][1], ent[i*2+1][2]) end
-local ma = band(ent[8][1], 0xFFFFFFC0)
+local ma = band(ent[8][1], CacheLineAlignMask)
 local mx = ent[10][1]
 local ar = ent[12][1]
 local rr = { band(ar,1)+1, band(rshift(ar,1),1)+3, band(rshift(ar,2),1)+5, band(rshift(ar,3),1)+7 }
@@ -68,7 +68,7 @@ do
 		if k == 27 then TGT[pc] = usage[D[pc]] for j=1,8 do usage[j]=pc end
 		elseif k == 17 then if S[pc] ~= D[pc] then usage[D[pc]]=pc usage[S[pc]]=pc end
 		elseif k == 11 then if band(words[pc][5], words[pc][5]-1) ~= 0 then usage[D[pc]]=pc end
-		elseif k ~= 18 and k ~= 19 and k ~= 20 and k ~= 21 and k ~= 22 and k ~= 23 and k ~= 24 and k ~= 25 and k ~= 26 and k ~= 28 then usage[D[pc]]=pc end
+		elseif k ~= 18 and k ~= 19 and k ~= 20 and k ~= 21 and k ~= 22 and k ~= 23 and k ~= 24 and k ~= 25 and k ~= 26 and k ~= 28 and k ~= 29 and k ~= 30 then usage[D[pc]]=pc end
 	end
 end
 rx.debug = function(m) print(m) end

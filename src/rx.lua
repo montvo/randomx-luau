@@ -8,7 +8,7 @@ local W = 4294967296
 
 local ScratchpadSize = 2097152
 local CacheLineSize = 64
-local CacheLineAlignMask = 0xFFFFFFC0
+local CacheLineAlignMask = 0x7FFFFFC0
 local DatasetExtraItems = 524287
 local L1Mask = 0x3FF8
 local L2Mask = 0x3FFF8
@@ -414,7 +414,7 @@ local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, sc
 		elseif k == 27 then
 			rlo[d], rhi[d] = ad64(rlo[d], rhi[d], ILO[pc], IHI[pc])
 			if M.debug then M.debug(string.format('cb d=%d ilo=%08x pc=%d tgt=%d', d, ILO[pc], pc, TGT[pc])) end
-			if band(rlo[d], lshift(ConditionMask, rshift(mod, 4) + ConditionOffset)) == 0 then pc = TGT[pc] + 1 end
+			if band(rlo[d], lshift(ConditionMask, rshift(mod, 4) + ConditionOffset)) == 0 then pc = TGT[pc] end
 		elseif k == 28 then
 			local r1 = rotr64(rlo[s], rhi[s], words[pc][5] % 64)
 			fprc = band(r1, 3)
@@ -446,13 +446,15 @@ function M.hash(blake, aes, ss, cache, key, input)
 	for i = 1, 8 do progs[i] = ss.generate(sgen) end
 
 	local rlo, rhi, flo, fhi, elo, ehi, alo, ahi = {}, {}, {}, {}, {}, {}, {}, {}
-	for i = 1, 8 do rlo[i] = 0 rhi[i] = 0 end
 	local words, tgt = {}, {}
 
 	for chain = 1, (M._chains or ProgramCount) do
+		-- referencni execute() ma nreg.r zero-inicializovane pri kazdem chainu
+		for i = 1, 8 do rlo[i] = 0 rhi[i] = 0 end
 		local parts = {}
 		for i = 1, 34 do parts[i] = gen4:next() end
 		local blob = buffer.fromstring(table.concat(parts))
+		if M.traceBlob then print("BLOB:" .. (blob and (buffer.readstring(blob, 0, 8):gsub('.', function(c) return string.format('%02x', string.byte(c)) end)))) end
 		local ent = {}
 		for i = 0, 15 do ent[i] = { buffer.readu32(blob, i * 8), buffer.readu32(blob, i * 8 + 4) } end
 		local function small(lo, hi)
@@ -474,7 +476,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 		local eMask = {}
 		for k = 1, 2 do
 			local lo, hi = ent[13 + k][1], ent[13 + k][2]
-			local expo = band(bor(0x300, lshift(band(rshift(hi, 27), 0x1F), 4)), 2047)
+			local expo = bor(0x300, lshift(band(rshift(hi, 28), 0xF), 4))
 			eMask[k] = { band(lo, 0x3FFFFF), lshift(expo, 20) }
 		end
 
@@ -494,7 +496,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 				if S[pc] ~= D[pc] then usage[D[pc]] = pc usage[S[pc]] = pc end
 			elseif k == 11 then
 				if not isZeroOrPow2(words[pc][5]) then usage[D[pc]] = pc end
-			elseif k ~= 18 and k ~= 19 and k ~= 20 and k ~= 21 and k ~= 22 and k ~= 23 and k ~= 24 and k ~= 25 and k ~= 26 and k ~= 28 then
+			elseif k ~= 18 and k ~= 19 and k ~= 20 and k ~= 21 and k ~= 22 and k ~= 23 and k ~= 24 and k ~= 25 and k ~= 26 and k ~= 28 and k ~= 29 and k ~= 30 then
 				usage[D[pc]] = pc
 			end
 		end
@@ -530,8 +532,23 @@ function M.hash(blake, aes, ss, cache, key, input)
 				local fb = {}
 				for i = 1, 4 do local a1, a2 = f2b(flo[i]) local b1, b2 = f2b(fhi[i]) fb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
 				print("DBGFE f:" .. table.concat(fb))
+				local eb = {}
+				for i = 1, 4 do local a1, a2 = f2b(elo[i]) local b1, b2 = f2b(ehi[i]) eb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
+				print("DBGFE e:" .. table.concat(eb))
 				print("DBGFN " .. tostring(flo[1]) .. " direct=" .. tostring(buffer.readi32(scratch, spAddr1)))
-			execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, scratch, rlo, rhi, flo, fhi, elo, ehi, alo, ahi, eMask, spAddr0, spAddr1)
+			local hook
+			if M.tracePC and chain == (M.traceChain or 1) and ic == (M.traceIt or 1) then
+				hook = function(pc)
+					local o = "pc" .. (pc - 1) .. " k" .. tostring(K[pc]) .. " d" .. tostring(D[pc]) .. " s" .. tostring(S[pc]) .. " r:"
+					for i = 1, 8 do o = o .. " " .. string.format("%08x%08x", rhi[i], rlo[i]) end
+					o = o .. " f:"
+					for i = 1, 4 do local a1, a2 = f2b(flo[i]) local b1, b2 = f2b(fhi[i]) o = o .. string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
+					o = o .. " e:"
+					for i = 1, 4 do local a1, a2 = f2b(elo[i]) local b1, b2 = f2b(ehi[i]) o = o .. string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
+					print(o)
+				end
+			end
+			execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, scratch, rlo, rhi, flo, fhi, elo, ehi, alo, ahi, eMask, spAddr0, spAddr1, hook)
 			if M.traceReg then
 				local rb = buffer.create(256)
 				for i = 1, 8 do buffer.writeu32(rb, (i-1)*8, rlo[i]) buffer.writeu32(rb, (i-1)*8+4, rhi[i]) end

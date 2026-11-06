@@ -31,56 +31,43 @@ jak v 1bitové divergenci najít bug.
 | `decodeWords` (překlad 256 instrukcí) | trace vs C bytecode | shoda |
 | `execProgram` (celý program, 256 pc) | trace r/f/e per-pc vs C | shoda |
 | Scratchpad fill, sp0/sp1 odvození, dataset read, store zpět | hash scratchpadu vs C | shoda |
-| Iterace 1–8 jednoho chainu | per-iter hash scratchpadu vs C | **shoda** |
+| Iterace 1–8 jednoho chainu | per-iter hash scratchpadu vs C | shoda |
+| Celý chain 1–8 × 2048 iterací | `rg:` hash registrového souboru po každé iteraci vs C | **16 384/16 384 shod** |
+| `t_rx.lua` na obou oficiálních vektorech | `test key 000`/`This is a test`, `key=00`/16 nul | **PASS** |
 
 Naměřeno: nativní `luau` CLI ~167 kH/s (8 vláken), v Robloxu ~9 600 H/s se 2 workery,
-cache fill 37 s, jeden hash ~6–7 s.
+cache fill 36 s, jeden celý hash (8 × 2048 iterací + finále) 7,2 s.
 
-## 3. Co chybí (aktuální blocker)
+## 3. Co zbývá
 
-`t_rx.lua` s oficiálním vektorem (`key = 00`, vstup 16 nul) stále končí `FAIL`:
+Hash je hotový: `t_rx.lua` vrací `PASS` na obou oficiálních vektorech a celý běh
+(8 chainů × 2048 iterací) má po každé iteraci shodný registrový soubor s C referencí.
+Zbývá:
 
-```
-expect  19041669a22e3d48a25741aa92fdc5289204170ec778edb8d42c31a4b42c04d7
-hash    89de49e96ed1cc2b37c45e697dddbc58c19fe34924acee8fed2e5888ad21caae
-```
+1. Napojení na executor skript (login přes bridge, nonce scan, submit) a otestování
+   proti poolu.
+2. Výkon: 7,2 s/hash znamená ~0,5 kH/s na vlákno — potřeba worker pool, time-slicing
+   a UI.
+3. `tests/t_mul.lua` spadne bez argumentů (`attempt to index nil with 'sub'`),
+   `t_rcp`/`t_add`/`t_sq` jen vypisují hodnoty bez PASS/FAIL.
 
-Prvních **8 iterací** prvního chainu je bit po bitu shodných s C referencí (pc, r, f, e,
-scratchpad hash, store zpět). Divergence vzniká až později v chainu, takže ji nelze
-přičíst žádné konkrétní instrukci — nejpravděpodobněji jde o stav, který se do dalších
-iterací přenáší a který zatím netestujeme (dataset/cache index, `mem.ma`/`mem.mx`
-prohození, nebo `a` registry).
+### Jak se divergence hledala (postup zůstává použitelný)
 
-### Rozpracovaný nástroj pro hledání
-
-`t_rg.lua` + úprava `trace.cpp` tisknou **raw 256 bajtů stavu** (r, f lo/hi, e lo/hi) po
-každé iteraci, obě strany stejně. Při 1 iteraci je výstup identický, takže pozorování
-je správné; běh na 2048 iterací se do posledního kroku nedokončil (čas).
-
-Postup, jak pokračovat:
+`t_rg.lua` + `rg:` tisk v `trace.cpp` tisknou raw 256 bajtů stavu po každé iteraci.
+`t_rg2`/`t_rg8` jsou totéž s pevným počtem chainů/iterací, `t_blob.lua` porovnává
+program chainu, `t_pc.lua` + `M.tracePC` dělá per-pc trace srovnání:
 
 ```sh
-cd /tmp/rx/rxsrc && ./trace 00 00000000000000000000000000000000 1 2048 | grep "^rg:" > /tmp/crg.txt
-cd /tmp/rx/luau  && luau t_rg.lua 2>&1 | grep "^rg:" > /tmp/lrg.txt
-# první rozdílný index = iterace, kde se to rozbije
-python3 - <<'PY'
-c=[l.strip() for l in open('/tmp/crg.txt')]; l=[l.strip() for l in open('/tmp/lrg.txt')]
+cd /tmp/rx/rxsrc && ./trace_dbg 00 00000000000000000000000000000000 8 2048 | grep "^rg:" > /tmp/crg.txt
+cd diagnostics && luau t_rg8.lua 2>&1 | grep "^rg:" > /tmp/lrg.txt
+python3 -c '
+c=[l.strip() for l in open("/tmp/crg.txt")]; l=[l.strip() for l in open("/tmp/lrg.txt")]
 bad=[i for i,(a,b) in enumerate(zip(c,l)) if a!=b]
 print("first diff", bad[0]+1 if bad else None, "count", len(bad))
-PY
+'
 ```
 
-Pak tutéž iteraci rozebrat klasickým per-pc trace (sekce 6.3). Očekávané zdroje chyby:
-
-- `datasetOffset` / `readPtr` maska (`CacheLineAlignMask`) — v `rx.lua` je konstanta
-  `0xFFFFFFC0`, reference má `0x7FFFFFC0`; u 32bit `band` to vyjde stejně, ale je to
-  kandidát na revizi.
-- rotace dataset itemu o `readPtr & 63` — v `rx.lua` **není**, protože `readPtr` je vždy
-  64bajtově zarovnaný (`datasetOffset` je násobek 64) a `datasetRead` čte po 8 bajtech
-  od `mem.memory + address`.
-- `a` registry: `reg.a` se do dalšího chainu nepřenáší z `execute()`, ale z `initialize()`
-  (viz `vm_interpreted.cpp`); hash je staví z entropie nového programu — to je v Luau
-  hotové, ale nikdy neověřené trace srovnáním.
+Pak tutéž iteraci rozebrat per-pc trace (sekce 6.3).
 
 ## 4. Architektura portu
 
@@ -103,10 +90,17 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 - `RegisterNeedsDisplacement = 5` (v 1-based Luau `d == 6`) pro IADD_RS.
 - CBRANCH: `b = rshift(mod,4) + ConditionOffset`,
   `imm = band(bor(ilo, lshift(1,b)), bnot(lshift(1, b-1)))`,
-  cíl `pc = TGT[pc] + 1`, skok jen když `band(r[dst], MASK) == 0`.
+  cíl `pc = TGT[pc]` (loop si `pc` sám inkrementuje), skok jen když `band(r[dst], MASK) == 0`.
+- `registerUsage` (zdroj `TGT`): zapisuje jen skutečný zápis registru. Nezapisují
+  FSWAP_R..FSQRT_R, CFROUND, ISTORE ani NOP; ISWAP_R zapisuje oba registry jen když
+  `s ~= d`; IMUL_RCP jen když dělitel není mocnina dvou.
+- `CacheLineAlignMask = (DATASET_BASE_SIZE - 1) & ~63 = 0x7FFFFFC0`.
+- `nreg.r` se nuluje **na začátku každého chainu**, ne jednou pro celý hash.
 - FSWAP přehazuje **lane v registru** (`_mm_shuffle_pd(a,a,1)`), ne registry.
 - FSCAL xoruje masku `0x80F0000000000000` do obou lane.
-- `eMask` = `getStaticExponent` tvar: `expo = band(bor(0x300, lshift(band(rshift(hi,27),0x1F),4)), 2047)`.
+- `eMask` = `getStaticExponent`: `expo = bor(0x300, lshift(band(rshift(hi,28),0xF),4))`
+  (`staticExponentBits = 64 - 32 - dynamicExponentBits`, `constExponentBits = 0x300`,
+  žádný clamp na 2047).
 - Načtení `e`/`f`/`FMUL_M`/`FDIV_M`: dvakrát `int32 → double` (po 4 bajtech), pak
   maska exponentu/mantisy pro `e`. Načíst `int64` je špatně.
 - `smulh`: negovat vstupy, `mulLimbs`, low/high 128 bitů, +1 do `q` jen když `p != 0`,
@@ -167,6 +161,13 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
     (`fhi[i] = b2f(...)`), předtím se zahazovala.
 14. Chybějící zápis `regFile` v `trace.cpp` (chain přechod).
 15. Špatná místa tisků v harnessech (`sp:`, `rg:` před vs. po store zpět).
+16. `CacheLineAlignMask = 0xFFFFFFC0` → `0x7FFFFFC0` (light VM maskuje jen base size).
+17. `eMask` se odvozoval z `hi >> 27 & 0x1F` a clampoval na 2047 → `hi >> 28 & 0xF`
+    bez clampu (viz sekce 4).
+18. CBRANCH skákal na `TGT[pc] + 1` (o instrukci dál) → `TGT[pc]`.
+19. `nreg.r` se nulovalo jen před prvním chainem → nuluje se v každém chainu.
+20. `registerUsage` se aktualizoval i pro CFROUND, ISTORE a NOP → vyřazeny
+    (CFROUND `28`, ISTORE `29`, NOP `30`).
 
 ## 9. Soubory
 
@@ -175,15 +176,14 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 - moduly: `rx.lua`, `blake2b.lua`, `aes.lua`, `argon2.lua`, `superscalar.lua`
 - testy: `t_rx.lua` (oficiální vektory), `t_trace.lua` (per-pc diff), `t_mul.lua`,
   `t_rcp.lua`, `t_add.lua`, `t_sq.lua`
-- hash/chain diagnostika: `t_rg.lua`, `t_rf.lua`, `t_sp.lua`, `t_dbg.lua`
+- hash/chain diagnostika: `t_rg.lua`, `t_rg2.lua`, `t_rg8.lua`, `t_rf.lua`, `t_sp.lua`,
+  `t_blob.lua`, `t_pc.lua`, `t_dbg.lua`
 - C strana: `trace.cpp` (do klonu `tevador/RandomX`, build `librandomx.a`)
 - transport: `stratum-bridge.js`
 
 ## 10. Navazující kroky
 
-1. Doběhnout `t_rg` srovnání na 2048 iterací a najít první divergentní iteraci.
-2. Opravit příčinu, dokud `t_rx.lua` nevrátí `PASS` na obou oficiálních vektorech
-   (`test key 000` / `This is a test` → `639183aa…2f0b4e3f`).
-3. Až hash sedí: napojit `rx.hash` do executor skriptu — login přes bridge, nonce scan,
-   submit; znovu otestovat throttling poolu.
-4. Teprve pak řešit výkon (worker pool, time-slicing) a UI.
+1. Napojit `rx.hash` do executor skriptu: login přes bridge, nonce scan, submit;
+   znovu otestovat throttling poolu.
+2. Výkon: worker pool, time-slicing, UI (7,2 s/hash je na reálné těžení pomalé).
+3. Dočistit testy (`t_mul` bez argumentů, PASS/FAIL u primitivních testů).
