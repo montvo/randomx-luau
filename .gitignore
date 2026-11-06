@@ -1,0 +1,5 @@
+node_modules/
+*.o
+*.a
+trace
+build/
