@@ -116,8 +116,14 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 - Target je 4bajtový; pro porovnání se rozšiřuje
   `target64 = 0xFFFFFFFFFFFFFFFF / (0xFFFFFFFF / t32)` a hash se čte jako LE u64.
 - Peněženka: `42ypgDkEvE1VQSLfXwQffKBF7L5vETygtfvaynG9nW8W7crvsrGv4ziAAmTppDkedKSdz9iAKM7f5gBwZpnNviY81ACgjhw`.
-- Pool `gulf`/`us.moneroocean.stream` občas zavře spojení (`ECONNRESET`) — po rychlých
-  reconnectingech je potřeba backoff; netestováno od opravy targetu.
+- Naměřeno v executoru (XxSkullyMaxX): login, keepalived i submit projdou; pool na
+  submit odpovídá a při `Block outdated` spojení zavře.
+- `pool.moneroocean.stream` občas padá na DNS (`ENOTFOUND`), `gulf.moneroocean.stream`
+  funguje; po reconnect stormu pool na chvíli přestane odpovídat → v mineru je
+  exponenciální backoff (5 s → 60 s).
+- Blok sem chodí ~40 s, takže share spočítaný o 3 bloky později skončí jako
+  `Block outdated`. Proto je potřeba zrychlit cache init (v Robloxu 130 s) i hash
+  (~18 s) — to je hlavní další práce.
 
 ## 6. Metodika ladění (jak se to dělalo a jak pokračovat)
 

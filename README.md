@@ -15,6 +15,28 @@ Stav: **hash se shoduje s C referencí bit po bitu** — všech 8 chainů × 204
 - `diagnostics/` — hash stavu po iteraci, trace a zkracování běhu (`t_rg`, `t_rg2`, `t_rg8`, `t_rf`, `t_sp`, `t_blob`, `t_pc`, `t_dbg`)
 - `c-ref/` — `trace.cpp`, protistrana pro `tevador/RandomX` (`librandomx.a`)
 - `bridge/` — `stratum-bridge.js`, WebSocket → pool TCP pro reálné shares
+- `miner/` — `main.lua` (miner logika) + `entry.lua`; `tools/bundle.py` z toho staví
+  jednosouborový `miner.lua` pro executor
+
+## Tezba v executoru
+
+1. Bridge (na stejném stroji jako executor):
+
+   ```sh
+   node bridge/stratum-bridge.js --pool gulf.moneroocean.stream:10128
+   ```
+
+2. V executoru spustit obsah `miner.lua` (peněženka je v `CONFIG.wallet` nahoře).
+   Skript se sám přihlásí, stáhne job, těží a posílá shares.
+
+3. Zastavit jde jiným skriptem: `_G.MINER_STOP = true`.
+   Pozor: jeden hash trvá v Robloxu ~18 s (plus ~130 s init cache), zatímco blok sem
+   chodí ~40 s — share proto často skončí jako `Block outdated`.
+   Jiné nastavení (třeba submit každého hashe i pod target): spustit `miner.lua`
+   s `MINER_CFG = { testShares = true }` před ním.
+
+`miner.lua` je generovaný — upravuj `miner/main.lua` nebo `src/`, pak `python3
+tools/bundle.py` (staví i `miner.test.lua` pro `tests/t_miner.lua`).
 
 ## Spuštění
 

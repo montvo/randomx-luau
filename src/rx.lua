@@ -1,4 +1,6 @@
 -- RandomX v1 (rx/0) light-mode hash, pure Luau.
+-- Debug/ladiní hacky: traceSp, traceReg, traceRF, traceFE, tracePC, traceBlob,
+-- _chains/_iters, slicePcs + slice (yield kazdych N instrukci, pro executor).
 local M = {}
 
 local bit32 = bit32
@@ -336,7 +338,16 @@ end
 
 local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, scratch, rlo, rhi, flo, fhi, elo, ehi, alo, ahi, eMask, spAddr0, spAddr1, hook)
 	local pc = 1
+	local slicePcs = M.slicePcs or 0
+	local sliceLeft = slicePcs
 	while pc <= ProgramSize do
+		if slicePcs > 0 then
+			sliceLeft = sliceLeft - 1
+			if sliceLeft <= 0 then
+				sliceLeft = slicePcs
+				M.slice()
+			end
+		end
 		local k = K[pc]
 		local d = D[pc]
 		local s = S[pc]
@@ -529,13 +540,15 @@ function M.hash(blake, aes, ss, cache, key, input)
 				ehi[i] = b2f(bor(x1, m1), bor(band(x2, 0xFFFFFF), m2))
 			end
 
-				local fb = {}
-				for i = 1, 4 do local a1, a2 = f2b(flo[i]) local b1, b2 = f2b(fhi[i]) fb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
-				print("DBGFE f:" .. table.concat(fb))
-				local eb = {}
-				for i = 1, 4 do local a1, a2 = f2b(elo[i]) local b1, b2 = f2b(ehi[i]) eb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
-				print("DBGFE e:" .. table.concat(eb))
-				print("DBGFN " .. tostring(flo[1]) .. " direct=" .. tostring(buffer.readi32(scratch, spAddr1)))
+				if M.traceFE then
+					local fb = {}
+					for i = 1, 4 do local a1, a2 = f2b(flo[i]) local b1, b2 = f2b(fhi[i]) fb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
+					print("DBGFE f:" .. table.concat(fb))
+					local eb = {}
+					for i = 1, 4 do local a1, a2 = f2b(elo[i]) local b1, b2 = f2b(ehi[i]) eb[i] = string.format("%08x%08x%08x%08x", a1, a2, b1, b2) end
+					print("DBGFE e:" .. table.concat(eb))
+					print("DBGFN " .. tostring(flo[1]) .. " direct=" .. tostring(buffer.readi32(scratch, spAddr1)))
+				end
 			local hook
 			if M.tracePC and chain == (M.traceChain or 1) and ic == (M.traceIt or 1) then
 				hook = function(pc)

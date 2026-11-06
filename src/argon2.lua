@@ -18407,7 +18407,7 @@ end
 -- reference_area_size base for a segment (index-1 is added per block)
 local M = {}
 
-function M.initCache(blake, key, m_cost, t_cost)
+function M.initCache(blake, key, m_cost, t_cost, onProgress)
 	assert(type(key) == "string", "key must be a string")
 	m_cost = m_cost or M_COST
 	t_cost = t_cost or T_COST
@@ -18448,6 +18448,7 @@ function M.initCache(blake, key, m_cost, t_cost)
 			end
 
 			for i = starting_index, seg_len - 1 do
+				if onProgress and i % 4096 == 0 then onProgress() end
 				if curr % lane_len == 1 then
 					prev = curr - 1
 				end

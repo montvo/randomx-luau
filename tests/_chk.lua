@@ -1,0 +1,13 @@
+local blake = require("../src/blake2b")
+local aes = require("../src/aes")
+local argon = require("../src/argon2")
+local ss = require("../src/superscalar")
+local rx = require("../src/rx")
+local function fromHex(h) return (h:gsub("%x%x", function(c) return string.char(tonumber(c,16)) end)) end
+local key = fromHex("3c84566822d6a64abefa07e2980e99299f24440643e8a77201adb196604b1832")
+local blob = fromHex("1010ef88b9d70612bedf6dd26440e34db153641376b2ca477abe933089476383faa665c6ac2ef1000000008a69bf09bb51105c089aedc53b531327822ba847b3d70daa3bc257ade8e2085123")
+local nonce = fromHex("b09a5e54")
+local input = blob:sub(1,39) .. nonce .. blob:sub(44)
+local cache = argon.initCache(blake, key)
+local h = rx.hash(blake, aes, ss, cache, key, input)
+print(#input, (h:gsub(".", function(c) return string.format("%02x", c:byte()) end)))
