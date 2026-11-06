@@ -8,4 +8,6 @@ WORKDIR /app
 COPY stratum-bridge.js ./
 
 EXPOSE 8790
-ENTRYPOINT ["node", "stratum-bridge.js", "--bind", "0.0.0.0", "--port", "8790"]
+# pool se da prebit pres --pool (env WALLET/STATS_API); druhy --pool je zalozni
+ENTRYPOINT ["node", "stratum-bridge.js", "--bind", "0.0.0.0", "--port", "8790", \
+            "--pool", "gulf.moneroocean.stream:10128", "--pool", "xmr-eu1.nanopool.org:14444"]

