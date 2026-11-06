@@ -1,6 +1,15 @@
 // stratum <-> websocket bridge for the Roblox miner
 // usage: node stratum-bridge.js [--port 8790] [--pool pool.moneroocean.stream:10001]
-const { WebSocketServer } = require("/Users/adamcejpa/Documents/GitHub/roblox-executor-mcp/node_modules/ws");
+// `ws` musi byt nainstalovany: npm i ws (nebo pouzij existujici instalaci)
+const { WebSocketServer } = (() => {
+	for (const id of ["ws", "/Users/adamcejpa/Documents/GitHub/roblox-executor-mcp/node_modules/ws"]) {
+		try {
+			return require(id);
+		} catch {}
+	}
+	console.error("chybi modul 'ws' — spust 'npm i ws' v tomhle adresari");
+	process.exit(1);
+})();
 const net = require("node:net");
 
 const args = process.argv.slice(2);
