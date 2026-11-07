@@ -57,6 +57,7 @@ function newClient(ip) {
 		shares: 0,
 		accepted: 0,
 		rejected: 0,
+		acc24: [], // casy prijatych shares za poslednich 24 h (vydělek se deli podle nich)
 		lastShareAt: null,
 		conn: true,
 		closedAt: null,
@@ -188,6 +189,7 @@ function onPoolLine(line) {
 				totals.rejected += 1;
 			} else {
 				c.accepted += 1;
+				c.acc24.push(Date.now());
 				totals.accepted += 1;
 			}
 			c.send?.({ jsonrpc: "2.0", id: who.rpcId, error: m.error ?? null, result: m.result ?? null });
@@ -251,6 +253,24 @@ async function refreshPrice() {
 }
 setInterval(refreshPrice, 300_000).unref();
 refreshPrice();
+
+// kurz USD -> CZK (ECB pres frankfurter.app, bez klice); pocita se jen vydelek
+let usdCzk = null;
+let fxAt = 0;
+async function refreshFx() {
+	try {
+		const r = await fetch("https://api.frankfurter.app/latest?from=USD&to=CZK", {
+			signal: AbortSignal.timeout(8000),
+		});
+		const v = (await r.json())?.rates?.CZK;
+		if (typeof v === "number" && v > 0) {
+			usdCzk = v;
+			fxAt = Date.now();
+		}
+	} catch {}
+}
+setInterval(refreshFx, 600_000).unref();
+refreshFx();
 
 // ── minimalni websocket ──────────────────────────────────────────────────────
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -443,8 +463,43 @@ function cacheRoute(socket, method, pathname, rest, sink) {
 	return true;
 }
 
+const DAY = 24 * 3600 * 1000;
+
+// Vydělek se nedeli podle hashrate (ten bridge od poolu per share nezna), ale
+// podle prijatych shares: vsechno jde pres jednu pool session, takze vardiff
+// miri vsem klientum stejne a share ma pro vsechny stejnou vahu. XMR/share je
+// (vyplaceno + nevyplaceno) / validShares z pool API — tedy prumer za celou
+// dobu existence peněženky, ne okamzita mzda.
+function pruneAndCount(now) {
+	let acc24 = 0;
+	for (const c of clients.values()) {
+		if (!c.acc24.length) continue;
+		let i = 0;
+		while (i < c.acc24.length && c.acc24[i] < now - DAY) i += 1;
+		if (i) c.acc24.splice(0, i);
+		acc24 += c.acc24.length;
+	}
+	return acc24;
+}
+
 function snapshot() {
 	const now = Date.now();
+	const acc24 = pruneAndCount(now);
+	const p = poolStats.data;
+	const xmrPerShare =
+		p && p.validShares > 0 && (p.paid ?? 0) + (p.unpaid ?? 0) > 0
+			? ((p.paid ?? 0) + (p.unpaid ?? 0)) / p.validShares
+			: null;
+	const czkPerShare = xmrPerShare != null && xmrUsd != null && usdCzk != null ? xmrPerShare * xmrUsd * usdCzk : null;
+	const earn = {
+		acc24,
+		xmrPerShare,
+		czkPerShare,
+		usdCzk,
+		fxAt,
+		walletCzk24: czkPerShare != null ? czkPerShare * acc24 : null,
+		walletXmr24: xmrPerShare != null ? xmrPerShare * acc24 : null,
+	};
 	return {
 		now,
 		uptimeS: Math.floor((now - STARTED) / 1000),
@@ -454,6 +509,7 @@ function snapshot() {
 		price: xmrUsd,
 		poolStats,
 		totals,
+		earn,
 		clients: [...clients.values()]
 			.sort((a, b) => b.since - a.since)
 			.map((c) => ({
@@ -468,6 +524,8 @@ function snapshot() {
 				shares: c.shares,
 				accepted: c.accepted,
 				rejected: c.rejected,
+				acc24: c.acc24.length,
+				czk24: czkPerShare != null ? czkPerShare * c.acc24.length : null,
 				height: c.height,
 			})),
 	};
@@ -493,6 +551,8 @@ tr:last-child td{border-bottom:none}
 .on{color:#3fb950}.off{color:#8b949e}
 .mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;color:#8b949e}
 .err{color:#f85149;font-size:12px;margin-top:8px}
+.note{color:#8b949e;font-size:11px;margin:10px 0 18px;max-width:760px}
+.warn{color:#d29922}
 </style></head><body>
 <h1>rx/0 bridge</h1>
 <div class="sub">pool <span class="mono" id="pool"></span> · peněženka <span class="mono" id="wallet"></span> · <span id="up"></span></div>
@@ -503,15 +563,20 @@ tr:last-child td{border-bottom:none}
   <div class="card"><div class="k">nevyplaceno (XMR)</div><div class="v" id="mUnpaid">–</div></div>
   <div class="card"><div class="k">celkem vyplaceno</div><div class="v" id="mPaid">–</div></div>
   <div class="card"><div class="k">hashrate (pool)</div><div class="v" id="mRate">–</div></div>
+  <div class="card"><div class="k">výdělek 24 h (Kč)</div><div class="v" id="mCzk24">–</div></div>
+  <div class="card"><div class="k">výdělek 24 h / uživatel</div><div class="v" id="mCzkUser">–</div></div>
 </div>
+<div class="note" id="note"></div>
 <div class="err" id="err"></div>
-<table><thead><tr><th>id</th><th>ip</th><th>stav</th><th>od</th><th>shares</th><th>přijato</th><th>odmítnuto</th><th>výška</th><th>agent</th></tr></thead>
+<table><thead><tr><th>id</th><th>ip</th><th>stav</th><th>od</th><th>shares</th><th>přijato</th><th>odmítnuto</th><th>výška</th><th>Kč/24 h</th><th>agent</th></tr></thead>
 <tbody id="rows"></tbody></table>
 <script>
 const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString("cs-CZ"));
 const ago = (t) => { if (!t) return "–"; const s = Math.floor((Date.now() - t) / 1000);
   return s < 60 ? s + " s" : Math.floor(s / 60) + " min"; };
 const xmr = (v) => (v == null ? "–" : Number(v).toFixed(6));
+const czk = (v) => (v == null ? "–" : Number(v).toFixed(5) + " Kč");
+const czkRate = (v) => (v == null ? "–" : Number(v).toFixed(6));
 async function tick() {
   try {
     const d = await (await fetch("api/stats")).json();
@@ -525,11 +590,27 @@ async function tick() {
     document.getElementById("mUnpaid").textContent = xmr(p && p.unpaid);
     document.getElementById("mPaid").textContent = xmr(p && p.paid);
     document.getElementById("mRate").textContent = p && p.hashRate ? fmt(Math.round(p.hashRate)) + " H/s" : "–";
+    const e = d.earn || {};
+    const online = d.clients.filter((c) => c.online).length;
+    document.getElementById("mCzk24").textContent = czk(e.walletCzk24);
+    document.getElementById("mCzkUser").textContent = czk(e.czkPerShare != null && online ? (e.walletCzk24 / online) : null);
+    const chybi = [];
+    if (!d.poolStats || !d.poolStats.data) chybi.push("pool API");
+    if (e.xmrPerShare == null) chybi.push("XMR/share");
+    if (e.usdCzk == null) chybi.push("kurz USD/CZK");
+    if (d.price == null) chybi.push("kurz XMR/USD");
+    document.getElementById("note").innerHTML =
+      "Výdělek = přijaté shares za 24 h × XMR/share × XMR/USD × USD/CZK. " +
+      "XMR/share = (vyplaceno + nevyplaceno) / validShares z pool API, sdílí se podle přijatých shares " +
+      "(vše jde přes jednu pool session, takže vardiff platí pro všechny stejně). Je to odhad, ne výplata." +
+      (e.usdCzk != null ? " Kurz USD/CZK " + Number(e.usdCzk).toFixed(3) + " z " + ago(e.fxAt) + " zpět." : "") +
+      (chybi.length ? " <span class=warn>Chybí: " + chybi.join(", ") + ".</span>" : "");
     document.getElementById("err").textContent = d.poolStats && d.poolStats.error ? "pool API: " + d.poolStats.error : "";
     document.getElementById("rows").innerHTML = d.clients.map((c) =>
       "<tr><td>" + c.id + "</td><td class=mono>" + c.ip + "</td><td class=" + (c.online ? "on>online" : "off>offline") +
       "</td><td>" + ago(c.since) + "</td><td>" + fmt(c.shares) + "</td><td>" + fmt(c.accepted) + "</td><td>" +
-      fmt(c.rejected) + "</td><td>" + (c.height ?? "–") + "</td><td class=mono>" + (c.agent || "") + "</td></tr>").join("");
+      fmt(c.rejected) + "</td><td>" + (c.height ?? "–") + "</td><td title='" + fmt(c.acc24) + " přijatých shares/24 h'>" +
+      czkRate(c.czk24) + "</td><td class=mono>" + (c.agent || "") + "</td></tr>").join("");
   } catch (e) { document.getElementById("err").textContent = String(e); }
 }
 tick(); setInterval(tick, 3000);

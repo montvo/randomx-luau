@@ -39,6 +39,24 @@ souhrn za vsechny klienty a cisla z pool API pro penizenku
 S `--wallet` (nebo env `WALLET`) bridge prepsise `login` kazdeho klienta, takze
 vsechno tezi na jednu adresu; puvodni adresa klienta zustava v dashboardu.
 
+### Odhad vydelku (Kc / 24 h)
+
+Karty „vydělek 24 h (Kč)“, „výdělek 24 h / uživatel“ a sloupec „Kč/24 h“ v tabulce
+pocitaji z pool API:
+
+```
+Kc/24h(klient) = prijate shares klienta za 24 h × XMR/share × XMR/USD × USD/CZK
+XMR/share      = (amtPaid + amtDue) / validShares      (prumer za celou peněženku)
+```
+
+Proc se deli podle shares a ne podle hashrate: bridge od poolu dostava jen
+`OK`/`Error` bez obtiznosti, takze per-share hashrate nema z ceho spocitat. Vsechno
+ale jde pres jednu pool session, takze vardiff je pro vsechny klienty stejny a share
+ma stejnou vahu. Kurz USD/CZK je z `api.frankfurter.app` (ECB, 10 min), XMR/USD
+z CoinGecko (5 min), pool stats z `--stats-api` (1 min); kdyz neco chybi, dashboard
+to vypise a Kč neukaze. Cislo je odhad, ne vyplata — meni se s kurzem i s tim, jak
+pool zrovna prepocitava obtiznost.
+
 ## Provoz
 
 - Jeden uzivatel = jedno WS spojeni = jedno TCP do poolu. Pool ma limity na IP.
