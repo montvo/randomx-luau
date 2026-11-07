@@ -47,6 +47,19 @@ executor neumi TCP.
 3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:
    `MINER_CFG = { wallet = "..." }` pred loaderem.
 
+### Sdilena cache
+
+Nejdriv se stavi 256 MB Argon2 cache z seedu bloku — a to je 83 % veskere prace
+klienta. Je to cista funkce seedu, takze ji pocitat v kazdem klientu je 30x ta
+sama prace. Bridge ji proto drzi a rozdalava pres `/cache/<seed>/…`: kdo ji ma,
+stahne 16 dilu nativnim HTTP (nezere Luau CPU), kdo ji postavi, chybejici dily
+nahraje. Pri 10 % duty to je rozdil mezi "cache se nikdy nestihne" a "hash bezi
+skoro hned" — a bridge pri 30 klientech usetri ~17 minut CPU na blok.
+
+Vypnout se to da na klientu (`MINER_CFG = { uploadCache = false }` nebo
+`cacheUrl = false`) i na bridge (`--no-cache`). Dve instance bez sdilene cache
+maji kazda svou.
+
 Zatez CPU ridi jediny knob `duty` (default `0.10` = 10 % jadra):
 
 ```lua
@@ -63,8 +76,8 @@ na 10 %. Na 10 % miner bezi, ale share v rozumne dobe neuvidis -- 10 % je "nic
 nepoznat pri hre", ne vydelek. Chces-li share, jdi na duty 0.5 nebo 1; chces-li
 60 FPS bez skubani, nech 0.10 nebo uber.
 
-Cena za 10 %: hash ~18 s -> ~180 s, stavba cache ~130 s -> ~22 min (dokud neni na
-disku) a share skoro vzdy dorazi po dalsim bloku, takze ho pool zahodi jako
+Cena za 10 %: hash ~18 s -> ~180 s, stavba cache ~130 s (jen kdyz ji nema bridge
+ani disk) a share skoro vzdy dorazi po dalsim bloku, takze ho pool zahodi jako
 `Block outdated`.
 
 Pozor: jeden hash trva pri 10 % ~180 s, blok chodi ~40 s —
@@ -85,6 +98,7 @@ luau t_rx.lua -a 00 00000000000000000000000000000000 19041669a22e3d48a25741aa92f
 luau t_trace.lua -a 00 00000000000000000000000000000000
 luau t_miner.lua   # integrace: login, job, hash, submit
 luau t_pace.lua    # duty throttle: cil 10 %, clamping, duty=1 nespi
+luau t_cache.lua   # sdilena cache: stazeni z bridge, upload po vlastni stavbe
 ```
 
 C strana:

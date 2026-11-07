@@ -53,7 +53,8 @@ Zbývá:
    proti poolu.
 2. Výkon: 7,2 s/hash znamená ~0,5 kH/s na vlákno — potřeba worker pool a UI.
    Time-slicing hotový: `duty` v `main.lua` (token bucket, default 10 % CPU,
-   `tests/t_pace.lua` měří dosažené duty a clamping).
+   `tests/t_pace.lua` měří dosažené duty a clamping, `tests/t_cache.lua` hlídá
+   stahování i nahrávání sdílené cache přes bridge).
 3. `tests/t_mul.lua` spadne bez argumentů (`attempt to index nil with 'sub'`),
    `t_rcp`/`t_add`/`t_sq` jen vypisují hodnoty bez PASS/FAIL.
 
@@ -130,6 +131,10 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 - Blok sem chodí ~40 s, takže share spočítaný o 3 bloky později skončí jako
   `Block outdated`. Proto je potřeba zrychlit cache init (v Robloxu 130 s) i hash
   (~18 s) — to je hlavní další práce.
+- Nejšíra: cache init je 83 % práce klienta a je to čistá funkce seedu, takže se
+  počítá jednou na bridge (`bridge/stratum-bridge.js`, `/cache/<seed>/…`, 16 × 16 MB,
+  LRU 2 seedy) a klienti si ji stahují nativním HTTP. Klient ji po vlastním
+  postavení nahraje, ale jen když ji bridge ještě nemá (hlídá `/meta`).
 
 ## 6. Metodika ladění (jak se to dělalo a jak pokračovat)
 

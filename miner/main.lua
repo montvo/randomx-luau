@@ -12,6 +12,9 @@ local CONFIG = {
 	worker = "rx-luau",
 	bridge = "ws://127.0.0.1:8790",
 	bridgeFallback = nil, -- druha adresa, zkusi se po selhani prvni
+	cacheUrl = nil, -- HTTP zaklad pro sdilenou cache (nil = odvozeno z bridge)
+	uploadCache = true, -- po postaveni cache ji nabidnout ostatnim
+	http = nil, -- HTTP klient (testy); defaultne request/http_request ze executoru
 	pass = "x",
 	-- jemna davka pro plynulost + konzervativni vynos
 	slicePcs = 256,
@@ -288,6 +291,97 @@ local function cachePart(seed, i)
 	return string.format("rx_cache_%s_%02d.bin", hex(seed):sub(1, 16), i)
 end
 
+------------------------------------------------------------------------ sdilena cache
+
+-- Argon2 cache je cista funkce seedu, takze ji nema smysl pocitat v kazdem
+-- klientu: 30 klientu by delalo 30x stejnou praci. Prvni ji nahraje na bridge,
+-- ostatni stahnout. Je to 83 % prace klienta, takze bez toho pri nizkem duty
+-- klient nestiha ani postavit cache na dalsi blok.
+local function httpBase()
+	local u = CONFIG.cacheUrl or CONFIG.bridge
+	if type(u) ~= "string" then return nil end
+	local base = u:gsub("^ws://", "http://"):gsub("^wss://", "https://")
+	if not base:find("^https?://") then return nil end
+	return (base:gsub("/+$", ""))
+end
+
+local function httpReq(method, url, body)
+	if CONFIG.http then return CONFIG.http(method, url, body) end
+	local req = rawget(_G, "request") or rawget(_G, "http_request")
+		or (type(syn) == "table" and syn.request) or nil
+	if type(req) ~= "function" then return nil end
+	local opts = { Url = url, Method = method, Headers = { ["Content-Type"] = "application/octet-stream" } }
+	if body then opts.Body = body end
+	local ok, res = pcall(req, opts)
+	if not ok or type(res) ~= "table" then return nil end
+	local code = tonumber(res.StatusCode or res.status)
+	local out = res.Body or res.body
+	if not code or code < 200 or code > 299 or type(out) ~= "string" then return nil end
+	return out
+end
+
+-- vraci seznam chybejicich dilu, nebo nil kdyz bridge nema/nerekne
+local function bridgeMeta(base, key)
+	local body = httpReq("GET", base .. "/cache/" .. key .. "/meta")
+	if not body then return nil end
+	local ok, m = pcall(decode, body)
+	if not ok or type(m) ~= "table" or type(m.have) ~= "table" then return nil end
+	if m.complete == true then return {} end
+	local missing = {}
+	local have = {}
+	for _, i in ipairs(m.have) do have[tonumber(i)] = true end
+	for i = 0, CACHE_PARTS - 1 do
+		if not have[i] then missing[#missing + 1] = i end
+	end
+	return missing
+end
+
+local function fetchBridge(seed)
+	local base = httpBase()
+	if not base then return nil end
+	local key = hex(seed):sub(1, 16)
+	local missing = bridgeMeta(base, key)
+	if missing == nil then return nil end -- bridge cache endpoint nema
+	if #missing > 0 then
+		log(string.format("cache na bridge nekompletni (%d/%d dilu)", CACHE_PARTS - #missing, CACHE_PARTS))
+		return nil
+	end
+	local wall0 = wall()
+	local okc, buf = pcall(buffer.create, CACHE_BYTES)
+	if not okc then return nil end
+	for i = 0, CACHE_PARTS - 1 do
+		local okr, data = pcall(httpReq, "GET", base .. "/cache/" .. key .. "/" .. i)
+		if not okr or type(data) ~= "string" or #data ~= CACHE_CHUNK then return nil end
+		buffer.copy(buf, i * CACHE_CHUNK, buffer.fromstring(data), 0, #data)
+		data = nil
+		pcall(FS.gc, "collect")
+		sliceDue()
+	end
+	log(string.format("cache stazena z bridge za %.1f s", wall() - wall0))
+	return buf
+end
+
+-- nabidnuti cache ostatnim; bezi na pozadi, aby se hned tezilo
+local function pushBridge(seed, buf)
+	if CONFIG.uploadCache == false then return end
+	local base = httpBase()
+	if not base then return end
+	local key = hex(seed):sub(1, 16)
+	local missing = bridgeMeta(base, key)
+	if missing == nil or #missing == 0 then return end
+	local tmp = buffer.create(CACHE_CHUNK)
+	local okAll = true
+	for _, i in ipairs(missing) do
+		buffer.copy(tmp, 0, buf, i * CACHE_CHUNK, CACHE_CHUNK)
+		if not httpReq("PUT", base .. "/cache/" .. key .. "/" .. i, buffer.tostring(tmp)) then
+			okAll = false
+			break
+		end
+		pcall(FS.gc, "collect")
+	end
+	if okAll then log("cache nabidnuta ostatnim (" .. key:sub(1, 8) .. ")") end
+end
+
 local function loadCache(seed)
 	if not FS.read then return nil end
 	local wall0 = wall()
@@ -336,12 +430,27 @@ local function saveCache(seed, buf)
 	end
 end
 
+local function detach(fn)
+	if type(task) == "table" and type(task.spawn) == "function" then return task.spawn(fn) end
+	return fn()
+end
+
 local function getCache(seed)
 	if cacheKey == seed then return cache end
-	local wall0 = wall()
+	-- 1) sdilena cache z bridge (nejrychlejsi, nativni HTTP nezere Luau CPU)
+	local fromBridge = fetchBridge(seed)
+	if fromBridge then
+		cache, cacheKey = fromBridge, seed
+		local keep = cache -- hodnota, ne upvalue (cache se pri dalsim seedu prebije)
+		detach(function() saveCache(seed, keep) end) -- at je i na disku, kdyz bridge spadne
+		return cache
+	end
+	-- 2) vlastni disk
 	local fromDisk = loadCache(seed)
 	if fromDisk then
 		cache, cacheKey = fromDisk, seed
+		local keep = cache
+		detach(function() pushBridge(seed, keep) end) -- doplnit bridge pro ostatni
 		return cache
 	end
 	log(string.format("stavim cache (pri %.0f %% duty ~%.1fx dele nez na plny vykon)…", duty * 100, 1 / duty))
@@ -362,6 +471,8 @@ local function getCache(seed)
 	local ts = wall()
 	saveCache(seed, cache)
 	log(string.format("cache ulozena za %.1f s (%d MB)", wall() - ts, CACHE_BYTES // 1048576))
+	local keep = cache
+	detach(function() pushBridge(seed, keep) end) -- ostatni klienti uz nemusi pocitat
 	return cache
 end
 
