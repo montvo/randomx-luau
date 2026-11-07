@@ -263,6 +263,12 @@ resi Traefik/Let's Encrypt, port 8790 zustava jen ve vnitrni siti).
 Redeploy = push do `master` a `POST /api/application.deploy` s hlavickou
 `x-api-key` (nebo zapnout autoDeploy). Loader ma tuhle URL zapečenou jako primarni.
 
+Sdilena cache potrebuje **perzistentni volume** mountnuty na `/cache` (Dokploy:
+aplikace → Advanced → Mounts → volume, `Mount Path = /cache`). Bez nej je cache
+v vrstve kontejneru a kazdy redeploy ji smaze, takze klienti znovu stavi Argon2
+(36 s z 41 s na hash). Pri prvnim nasazeni je potreba volume pridat, nez se
+bridge rozjede.
+
 Bridge multiplexuje vsechny klienty do jednoho pool spojeni (pool vidi 1 IP,
 `--pool` lze zadat vicekrat jako zalozni seznam). Na `/` je dashboard (pripojeni klienti, souhrn shares, cisla z pool API
 pro vynucenou penizenku) a `/api/stats` s JSONem. Penizenka se vynucuje pres env
