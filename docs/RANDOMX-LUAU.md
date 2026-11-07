@@ -242,8 +242,8 @@ zbytek (7,2 s → 4,3 s na hash, −39 %), vše s `t_rx` na obou vektorech po ka
 
 - `miner/loader.lua` stahuje `miner.lua` z catboxu a predava `MINER_CFG`; po kazdem
   rebuildu je potreba `miner.lua` znovu nahrat a URL prebakedovat.
-- Aktualne nahrane: `miner.lua` = https://files.catbox.moe/rc1ndo.lua,
-  `loader.lua` = https://files.catbox.moe/m62w4x.lua (verze v gitu, SHA-256 sedi).
+- Aktualne nahrane: `miner.lua` = https://files.catbox.moe/kbgje8.lua,
+  `loader.lua` = https://files.catbox.moe/k3n7j0.lua (verze v gitu, SHA-256 sedi).
 - `bridge/install.sh|.command|.cmd` stahnou bridge do `~/.rx-bridge` a spusti ho.
 - Bridge je bez zavislosti (vlastni WS handshake nad `node:net`); modul `ws` je
   nahrazen, protoze na cizich strojich neni.
