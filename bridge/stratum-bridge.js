@@ -364,8 +364,10 @@ async function cacheMeta(seed) {
 	return { seed, parts: CACHE_PARTS, partBytes: CACHE_PART, have, complete: have.length === CACHE_PARTS };
 }
 
-// vraci true, kdyz si request vzal socket (telo se dočte pres bodySink)
+// vraci true, kdyz si request vzal socket (telo se dočte pres bodySink);
+// false znamena "neni moje cesta", takze dashboard a /api/stats projdou dal
 function cacheRoute(socket, method, pathname, rest, sink) {
+	if (pathname !== "/cache" && !pathname.startsWith("/cache/")) return false;
 	const m = /^\/cache\/([0-9a-f]{8,64})(?:\/(meta|\d+))?$/.exec(pathname);
 	if (!m) {
 		sendHttp(socket, "404 Not Found", "text/plain", "cache: neznamy tvar cesty\n");

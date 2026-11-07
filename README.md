@@ -103,6 +103,7 @@ luau t_compile.lua # kompilace i fallback (M.noCompile) musi dat stejny hash
 luau t_miner.lua   # integrace: login, job, hash, submit
 luau t_pace.lua    # duty throttle: cil 10 %, clamping, duty=1 nespi
 luau t_cache.lua   # sdilena cache: stazeni z bridge, upload po vlastni stavbe
+node ../tests/t_bridge.js  # routovani bridge a cache round trip
 ```
 
 C strana:
