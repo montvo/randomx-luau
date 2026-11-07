@@ -20784,6 +20784,7 @@ local budget = 0            -- sekundy prace, ktere si muzeme dovolit
 local qCpu, qWall = 0, 0    -- referencni body kvanta
 local statCpu, statWall = 0, 0
 local statSleep, statSlices = 0, 0
+local hashFrom -- cas prvniho hashe, pro H/s v tepu
 local pumpHook = function() end -- naplni se pump() nize; drzi WS zivy i behem hashe
 
 local function cpuNow()
@@ -20835,10 +20836,6 @@ local function sliceDue()
 	budget = math.min(budget + wallD * duty - cpu, maxSleepS * duty)
 
 	statCpu, statWall = statCpu + cpu, statWall + wallD
-	if statWall > 3 then
-		log(string.format("duty %.1f %% (cil %.0f %%)", 100 * statCpu / statWall, duty * 100))
-		statCpu, statWall = 0, 0
-	end
 	if stopRequested() then stop = true end
 	pumpHook() -- vybav frontu (novy job, keepalive) i uprostred hashe
 
@@ -20847,11 +20844,21 @@ local function sliceDue()
 	if s < minSleepS then s = minSleepS elseif s > maxSleepS then s = maxSleepS end
 	local s0 = wall()
 	wait(s)
-	statSleep = statSleep + (wall() - s0)
+	local slept = wall() - s0
+	statSleep = statSleep + slept
 	statSlices = statSlices + 1
+	-- spanek patri do stejneho okna jako prace, jinak vyjde duty 100 %
+	statWall = statWall + slept
 	budget = budget + s * duty
 	if budget < -maxSleepS * duty then budget = -maxSleepS * duty end
 	qCpu, qWall = cpuNow(), wall()
+
+	-- tep: po 20 s rekni, ze to zije a jak daleko od cile jsme
+	if statWall > 20 then
+		log(string.format("duty %.1f %% (cil %.0f %%), %d hashu, %.4f H/s",
+			100 * statCpu / statWall, duty * 100, done, done / math.max(wall() - (hashFrom or wall()), 1)))
+		statCpu, statWall = 0, 0
+	end
 	return sliceLen
 end
 
@@ -21024,6 +21031,7 @@ local function mine()
 	local c = getCache(seed)
 	local nonce = math.random(0, 0x7FFFFFFF)
 	local t0 = wall()
+	hashFrom = hashFrom or t0
 
 	while job and job.seed == seed and not stop do
 		-- blob/target cti z aktualniho jobu, aby share neodchazely na stary blok
@@ -21061,7 +21069,11 @@ function M.run(over)
 	duty = d
 	frameS = tonumber(CONFIG.frameS) or frameS
 	if frameS <= 0 then frameS = 1 / 60 end
-	workS = tonumber(CONFIG.workS) or duty * frameS
+	workS = tonumber(CONFIG.workS)
+	if not workS then
+		-- prilis kratke kvantum = prilis mnoho yieldu (kazdy task.wait neco stoji)
+		workS = math.max(duty * frameS, 0.003)
+	end
 	if workS < 0.0005 then workS = 0.0005 end
 	minSleepS = CONFIG.minSleepS or math.min(frameS, workS)
 	maxSleepS = CONFIG.maxSleepS or math.max(0.1, workS * 4)

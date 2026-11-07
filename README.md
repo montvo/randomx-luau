@@ -41,7 +41,7 @@ executor neumi TCP.
 2. Do executoru vlozit `miner/loader.lua`, nebo jen odkaz:
 
    ```lua
-   loadstring(game:HttpGet("https://files.catbox.moe/33dzqf.lua"))()
+   loadstring(game:HttpGet("https://files.catbox.moe/kiz8k0.lua"))()
    ```
 
 3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:
@@ -54,11 +54,18 @@ MINER_CFG = { duty = 0.10 } -- 0.02 .. 1
 ```
 
 nebo `_G.RX_DUTY = 0.10`. Pacing je token bucket: prace stoji budget, spanek ho
-doplnuje, takze CPU drzi na cili i pri vypadcich frameratu; kazdych 3 s se do logu
-pise dosazene `duty`, aby se dalo overit. Cena za 10 %: hash ~18 s -> ~180 s,
-stavba cache ~130 s -> ~22 min (dokud neni na disku), share skoro vzdy dorazi po
-dalsim bloku a pool ho zahodi jako `Block outdated`. Chces-li rychlejsi shares,
-zvys `duty`; chces-li hru na 60 FPS bez skubani, nech 0.10 nebo uber.
+doplnuje, takze CPU drzi na cili i pri vypadcich frameratu; kazdych 20 s se do
+logu pise dosazene `duty` a H/s, aby se dalo overit, ze to opravdu sedi.
+
+Kolik to realne vynese: pool posila target `00022f3`, tedy share padne v prumeru
+na ~480 000 hashu. Pri ~18 s/hash to je radove 100 dni na plny vykon a ~2,7 roku
+na 10 %. Na 10 % miner bezi, ale share v rozumne dobe neuvidis -- 10 % je "nic
+nepoznat pri hre", ne vydelek. Chces-li share, jdi na duty 0.5 nebo 1; chces-li
+60 FPS bez skubani, nech 0.10 nebo uber.
+
+Cena za 10 %: hash ~18 s -> ~180 s, stavba cache ~130 s -> ~22 min (dokud neni na
+disku) a share skoro vzdy dorazi po dalsim bloku, takze ho pool zahodi jako
+`Block outdated`.
 
 Pozor: jeden hash trva pri 10 % ~180 s, blok chodi ~40 s —
 share proto casto skonci jako `Block outdated`. `MINER_STOP` se vyhodnocuje i
