@@ -14,6 +14,7 @@ local ARGON2_D = 0
 local SEG_LEN = 65536
 local LANE_LEN = 262144
 local BLOCK = 1024
+local PROGRESS_STEP = 8
 local SALT = "RandomX" -- 8 bytes, no NUL terminator
 local SALT_LEN = 8
 
@@ -18448,7 +18449,8 @@ function M.initCache(blake, key, m_cost, t_cost, onProgress)
 			end
 
 			for i = starting_index, seg_len - 1 do
-				if onProgress and i % 4096 == 0 then onProgress() end
+				-- casto, aby caller mohl plynule yieldovat (rozhoduje si sam podle casu)
+				if onProgress and i % PROGRESS_STEP == 0 then onProgress() end
 				if curr % lane_len == 1 then
 					prev = curr - 1
 				end

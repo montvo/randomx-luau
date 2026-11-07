@@ -1,0 +1,8 @@
+local blake = require("../src/blake2b")
+print("blake:", type(blake))
+local aes = require("../src/aes")
+print("aes:", type(aes))
+local argon = require("../src/argon2")
+print("argon:", type(argon))
+local ss = require("../src/superscalar")
+print("ss:", type(ss))

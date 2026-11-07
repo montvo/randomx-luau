@@ -33,7 +33,12 @@ jak v 1bitové divergenci najít bug.
 | Scratchpad fill, sp0/sp1 odvození, dataset read, store zpět | hash scratchpadu vs C | shoda |
 | Iterace 1–8 jednoho chainu | per-iter hash scratchpadu vs C | shoda |
 | Celý chain 1–8 × 2048 iterací | `rg:` hash registrového souboru po každé iteraci vs C | **16 384/16 384 shod** |
-| `t_rx.lua` na obou oficiálních vektorech | `test key 000`/`This is a test`, `key=00`/16 nul | **PASS** |
+| `t_rx.lua` na obou oficiálních vektorech | `test key 000`: klíč `74657374206b657920303030` (ASCII `test key 000`), vstupy `This is a test` a `Lorem ipsum dolor sit amet` | **PASS** |
+
+Pozn.: klíč `00` (jeden bajt) dá jiný hash než oficiální vektor — pro vektor 2 je
+potřeba klíč `74657374206b657920303030`, jinak `t_rx` vrátí `FAIL` i na správném kódu.
+Pro vektor 1 (16 nul na vstupu, `19041669…`) sedí klíč `00`, protože je to vlastní
+vektor z C reference, ne oficiální.
 
 Naměřeno: nativní `luau` CLI ~167 kH/s (8 vláken), v Robloxu ~9 600 H/s se 2 workery,
 cache fill 36 s, jeden celý hash (8 × 2048 iterací + finále) 7,2 s.
@@ -46,8 +51,9 @@ Zbývá:
 
 1. Napojení na executor skript (login přes bridge, nonce scan, submit) a otestování
    proti poolu.
-2. Výkon: 7,2 s/hash znamená ~0,5 kH/s na vlákno — potřeba worker pool, time-slicing
-   a UI.
+2. Výkon: 7,2 s/hash znamená ~0,5 kH/s na vlákno — potřeba worker pool a UI.
+   Time-slicing hotový: `duty` v `main.lua` (token bucket, default 10 % CPU,
+   `tests/t_pace.lua` měří dosažené duty a clamping).
 3. `tests/t_mul.lua` spadne bez argumentů (`attempt to index nil with 'sub'`),
    `t_rcp`/`t_add`/`t_sq` jen vypisují hodnoty bez PASS/FAIL.
 
@@ -198,6 +204,8 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 
 - `miner/loader.lua` stahuje `miner.lua` z catboxu a predava `MINER_CFG`; po kazdem
   rebuildu je potreba `miner.lua` znovu nahrat a URL prebakedovat.
+- Aktualne nahrane: `miner.lua` = https://files.catbox.moe/tu6zte.lua,
+  `loader.lua` = https://files.catbox.moe/33dzqf.lua (verze v gitu, SHA-256 sedi).
 - `bridge/install.sh|.command|.cmd` stahnou bridge do `~/.rx-bridge` a spusti ho.
 - Bridge je bez zavislosti (vlastni WS handshake nad `node:net`); modul `ws` je
   nahrazen, protoze na cizich strojich neni.

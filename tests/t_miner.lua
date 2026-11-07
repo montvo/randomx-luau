@@ -44,7 +44,7 @@ end
 -- cfg se predava do run(): require() v luau CLI ma vlastni globalni prostredi,
 -- takze globalni `syn`/`task` z tohoto souboru tam nejsou videt.
 local cfg = {
-	bridge = "ws://mock", chains = 1, iters = 8, maxHashes = 2, sliceBudget = 0,
+	bridge = "ws://mock", chains = 1, iters = 8, maxHashes = 2, duty = 0.10,
 	connect = function() return ws end,
 	decode = decode,
 }

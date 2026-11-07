@@ -1,0 +1,1 @@
+local M = require("../miner.test"); print(type(M)); if type(M)=="table" then print(next(M)) end

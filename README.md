@@ -41,14 +41,29 @@ executor neumi TCP.
 2. Do executoru vlozit `miner/loader.lua`, nebo jen odkaz:
 
    ```lua
-   loadstring(game:HttpGet("https://files.catbox.moe/iyr8u5.lua"))()
+   loadstring(game:HttpGet("https://files.catbox.moe/33dzqf.lua"))()
    ```
 
 3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:
    `MINER_CFG = { wallet = "..." }` pred loaderem.
 
-Pozor: jeden hash trva v Robloxu ~18 s (plus ~130 s init cache), blok chodi ~40 s —
-share proto casto skonci jako `Block outdated`. Executor ma taky maly limit
+Zatez CPU ridi jediny knob `duty` (default `0.10` = 10 % jadra):
+
+```lua
+MINER_CFG = { duty = 0.10 } -- 0.02 .. 1
+```
+
+nebo `_G.RX_DUTY = 0.10`. Pacing je token bucket: prace stoji budget, spanek ho
+doplnuje, takze CPU drzi na cili i pri vypadcich frameratu; kazdych 3 s se do logu
+pise dosazene `duty`, aby se dalo overit. Cena za 10 %: hash ~18 s -> ~180 s,
+stavba cache ~130 s -> ~22 min (dokud neni na disku), share skoro vzdy dorazi po
+dalsim bloku a pool ho zahodi jako `Block outdated`. Chces-li rychlejsi shares,
+zvys `duty`; chces-li hru na 60 FPS bez skubani, nech 0.10 nebo uber.
+
+Pozor: jeden hash trva pri 10 % ~180 s, blok chodi ~40 s —
+share proto casto skonci jako `Block outdated`. `MINER_STOP` se vyhodnocuje i
+behem hashe, ale hash se nedá přerušit — při 10 % to tedy trvá až ~3 min, než se
+miner zastavi (loader na to ceka, dokud nedobehne). Executor ma taky maly limit
 soucasnych websocketu: kdyz zustanou viset stare instance, dalsi pripojeni se
 nevrati — pomuze rejoin.
 
@@ -61,6 +76,8 @@ tools/bundle.py` (staví i `miner.test.lua` pro `tests/t_miner.lua`).
 cd tests
 luau t_rx.lua -a 00 00000000000000000000000000000000 19041669a22e3d48a25741aa92fdc5289204170ec778edb8d42c31a4b42c04d7
 luau t_trace.lua -a 00 00000000000000000000000000000000
+luau t_miner.lua   # integrace: login, job, hash, submit
+luau t_pace.lua    # duty throttle: cil 10 %, clamping, duty=1 nespi
 ```
 
 C strana:

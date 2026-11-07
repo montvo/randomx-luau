@@ -515,6 +515,7 @@ local ARGON2_D = 0
 local SEG_LEN = 65536
 local LANE_LEN = 262144
 local BLOCK = 1024
+local PROGRESS_STEP = 8
 local SALT = "RandomX" -- 8 bytes, no NUL terminator
 local SALT_LEN = 8
 
@@ -18949,7 +18950,8 @@ function M.initCache(blake, key, m_cost, t_cost, onProgress)
 			end
 
 			for i = starting_index, seg_len - 1 do
-				if onProgress and i % 4096 == 0 then onProgress() end
+				-- casto, aby caller mohl plynule yieldovat (rozhoduje si sam podle casu)
+				if onProgress and i % PROGRESS_STEP == 0 then onProgress() end
 				if curr % lane_len == 1 then
 					prev = curr - 1
 				end
@@ -19961,6 +19963,10 @@ local rx = __mod([==[
 -- _chains/_iters, slicePcs + slice (yield kazdych N instrukci, pro executor).
 local M = {}
 
+-- yield hook pro executor: zavola se po kazdem `slicePcs` instrukci a vraci
+-- delku dalsiho useku (caller si tak ridi plynulost podle realneho casu)
+M.slice = function() end
+
 local bit32 = bit32
 local band, bor, bxor, bnot, lshift, rshift = bit32.band, bit32.bor, bit32.bxor, bit32.bnot, bit32.lshift, bit32.rshift
 local sqrt = math.sqrt
@@ -20302,8 +20308,9 @@ local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, sc
 		if slicePcs > 0 then
 			sliceLeft = sliceLeft - 1
 			if sliceLeft <= 0 then
+				local nxt = M.slice()
+				if type(nxt) == "number" and nxt > 0 then slicePcs = nxt end
 				sliceLeft = slicePcs
-				M.slice()
 			end
 		end
 		local k = K[pc]
@@ -20405,14 +20412,20 @@ function M.hash(blake, aes, ss, cache, key, input)
 	local scratch = buffer.create(ScratchpadSize)
 	local seed = blake.blake2b(input, 64)
 	local gen1 = aes.gen1R(seed)
+	local spStep = M.slicePcs or 0
+	if spStep > 0 then spStep = math.max(256, spStep * 4) end
 	for i = 0, ScratchpadSize / 64 - 1 do
+		if spStep > 0 and i % spStep == 0 then M.slice() end
 		buffer.writestring(scratch, i * 64, gen1:next())
 	end
 	local gen4 = aes.gen4R(gen1.state)
 
 	local sgen = ss.newGen(blake, key)
 	local progs = {}
-	for i = 1, 8 do progs[i] = ss.generate(sgen) end
+	for i = 1, 8 do
+		progs[i] = ss.generate(sgen)
+		if M.slicePcs and M.slicePcs > 0 then M.slice() end
+	end
 
 	local rlo, rhi, flo, fhi, elo, ehi, alo, ahi = {}, {}, {}, {}, {}, {}, {}, {}
 	local words, tgt = {}, {}
@@ -20471,6 +20484,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 		end
 
 		local spAddr0, spAddr1 = mx, ma
+		if M.slicePcs and M.slicePcs > 0 and chain ~= 1 then M.slice() end
 		for ic = 1, (M._iters or ProgramIterations) do
 			spAddr0 = band(bxor(spAddr0, bxor(rlo[readReg0], rlo[readReg1])), L3Mask64)
 			spAddr1 = band(bxor(spAddr1, bxor(rhi[readReg0], rhi[readReg1])), L3Mask64)
@@ -20609,8 +20623,12 @@ local CONFIG = {
 	bridge = "ws://127.0.0.1:8790",
 	bridgeFallback = nil, -- druha adresa, zkusi se po selhani prvni
 	pass = "x",
-	-- yield kazdych N instrukci VM (0 = bez yieldovani, cely hash najednou ~8 s)
-	slicePcs = 1024,
+	-- jemna davka pro plynulost + konzervativni vynos
+	slicePcs = 256,
+	duty = 0.10, -- podil CPU, ktery smi miner zit; jediny knob plynulosti
+	workS = nil, -- kvantum prace v s; nil = odvozene z duty a ramce (1/60 s)
+	frameS = nil, -- delka ramce pro odvozeni workS (nil = 1/60)
+	maxSleepS = nil, -- strop jednoho spanku (nil = 0.1), aby GC spika nezamrzla hru
 	reconnectDelay = 5, -- zaklad backoffu, zdvojnasobi se az do 60 s
 	-- 8 x 2048 = plny RandomX; nizsi hodnoty jen pro test
 	chains = nil,
@@ -20621,11 +20639,24 @@ local CONFIG = {
 	connect = nil,
 	wait = nil,
 	decode = nil,
+	clock = nil, -- zdroj CPU casu (testy)
+	wall = nil, -- zdroj skutecneho casu (testy)
 }
 
 local NONCE_OFFSET = 39 -- kde v 76bajtovem blobu lezi 4bajtovy nonce
 
 --------------------------------------------------------------------------- util
+
+-- souborove API (executor ho ma globalne, testy si ho podstrci pres CONFIG)
+local FS = {}
+local function initFs()
+	FS.read = CONFIG.readFile or (type(readfile) == "function" and readfile or nil)
+	FS.write = CONFIG.writeFile or (type(writefile) == "function" and writefile or nil)
+	FS.exists = CONFIG.fileExists or (type(isfile) == "function" and isfile or nil)
+	FS.list = CONFIG.listFiles or (type(listfiles) == "function" and listfiles or nil)
+	FS.delete = CONFIG.deleteFile or (type(delfile) == "function" and delfile or nil)
+	FS.gc = collectgarbage
+end
 
 local function decode(s)
 	if CONFIG.decode then return CONFIG.decode(s) end
@@ -20703,8 +20734,20 @@ local function bridgeUrl()
 	return CONFIG.bridge
 end
 
+-- log jde na konzoli a kdyz to executor umi i do rx_log.txt;
+-- konzole byva zahlcena vlastnimi zpravami, ze souboru se tocti spolehliveji
+local logLines = {}
+initFs()
 local function log(...)
-	print("[miner]", ...)
+	local parts = {}
+	for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+	local line = table.concat(parts, " ")
+	print("[miner]", line)
+	if FS.write then
+		table.insert(logLines, string.format("%.1f %s", os.clock(), line))
+		if #logLines > 300 then table.remove(logLines, 1) end
+		pcall(FS.write, "rx_log.txt", table.concat(logLines, "\n"))
+	end
 end
 
 -------------------------------------------------------------------------- stav
@@ -20724,6 +20767,94 @@ local function stopRequested()
 	return rawget(_G, "MINER_STOP") == true
 end
 
+------------------------------------------------------------------------ pacing
+
+-- Jeden knob: `duty` = podil CPU, ktery smi miner zit (0.10 = 10 %).
+-- Token bucket: prace budget spotrebovava, spanek ho doplnuje. Kvantum prace se
+-- odvozuje z duty a ramce, takze pri nizkem duty vyjde jeden maly kousek na
+-- ramec a zbytek ramce se spi -- CPU zustava na cili i tam, kde je `task.wait`
+-- uzamceny po ramcich (60 Hz).
+local duty = 0.10
+local frameS = 1 / 60
+local workS = duty * frameS -- ~1,7 ms pri 10 %
+local minSleepS = frameS    -- kratsi spanek stejne skonci na ramci
+local maxSleepS = 0.1       -- strop, aby GC spika nezpusobila dlouhy freeze
+local sliceLen = 256        -- instrukci mezi kontrolami casu
+local budget = 0            -- sekundy prace, ktere si muzeme dovolit
+local qCpu, qWall = 0, 0    -- referencni body kvanta
+local statCpu, statWall = 0, 0
+local statSleep, statSlices = 0, 0
+local pumpHook = function() end -- naplni se pump() nize; drzi WS zivy i behem hashe
+
+local function cpuNow()
+	if CONFIG.clock then return CONFIG.clock() end
+	return os.clock()
+end
+
+-- skutecny cas: tick() v Robloxu, DateTime jako zaloha, os.clock az nakonec
+local wallNow
+if type(tick) == "function" then
+	wallNow = tick
+elseif type(DateTime) == "table" or type(DateTime) == "userdata" then
+	local ok = pcall(function() return DateTime.now().UnixTimestampMillis end)
+	wallNow = ok and function() return DateTime.now().UnixTimestampMillis / 1000 end or os.clock
+else
+	wallNow = os.clock
+end
+
+local function wall()
+	if CONFIG.wall then return CONFIG.wall() end
+	return wallNow()
+end
+
+local function resetPace()
+	budget = 0
+	statCpu, statWall, statSleep, statSlices = 0, 0, 0, 0
+	qCpu, qWall = cpuNow(), wall()
+end
+
+-- jeden radek o prubehu tezke casti (cache): jak dlouho, jak dlouho se spalo
+local function pacelog(what, wall0, sleep0)
+	local wallD = math.max(wall() - wall0, 0.001)
+	local slept = statSleep - sleep0
+	log(string.format("%s %.1f s, spanku %.1f s, prumerna davka %.1f ms",
+		what, wallD, slept, 1000 * math.max(wallD - slept, 0) / math.max(statSlices, 1)))
+	statSleep, statSlices = 0, 0
+end
+
+-- vola se z rx po kazdem `sliceLen` instrukci; vraci delku dalsiho useku.
+-- Kvantum jeste nedobehlo -> makame dal. Budget vycerpany -> spime presne tak
+-- dlouho, aby se doplnil, a tim drzime cilove duty.
+local function sliceDue()
+	local c, w = cpuNow(), wall()
+	local cpu, wallD = c - qCpu, w - qWall
+	if cpu < workS then return sliceLen end -- jeste mame kvantum
+	if wallD <= 0 then wallD = cpu end -- rozbity zdroj casu: ucetni aspon CPU
+	if cpu > wallD then cpu = wallD end -- CPU nemuze presiahnout skutecny cas
+	qCpu, qWall = c, w
+	budget = math.min(budget + wallD * duty - cpu, maxSleepS * duty)
+
+	statCpu, statWall = statCpu + cpu, statWall + wallD
+	if statWall > 3 then
+		log(string.format("duty %.1f %% (cil %.0f %%)", 100 * statCpu / statWall, duty * 100))
+		statCpu, statWall = 0, 0
+	end
+	if stopRequested() then stop = true end
+	pumpHook() -- vybav frontu (novy job, keepalive) i uprostred hashe
+
+	if budget >= 0 then return sliceLen end
+	local s = -budget / duty
+	if s < minSleepS then s = minSleepS elseif s > maxSleepS then s = maxSleepS end
+	local s0 = wall()
+	wait(s)
+	statSleep = statSleep + (wall() - s0)
+	statSlices = statSlices + 1
+	budget = budget + s * duty
+	if budget < -maxSleepS * duty then budget = -maxSleepS * duty end
+	qCpu, qWall = cpuNow(), wall()
+	return sliceLen
+end
+
 -- paramsById(id) vraci hotovy JSON objekt s "id"
 local function send(method, paramsById)
 	msgId = msgId + 1
@@ -20740,8 +20871,8 @@ local function submit(nonceHex, resultHex)
 end
 
 local function keepalive()
-	if not sessionId or os.clock() - lastKeep < 30 then return end
-	lastKeep = os.clock()
+	if not sessionId or wall() - lastKeep < 30 then return end
+	lastKeep = wall()
 	send("keepalived", function(id) return string.format('{"id":%d}', id) end)
 end
 
@@ -20752,23 +20883,88 @@ local function login()
 		msgId, CONFIG.wallet, CONFIG.pass, CONFIG.worker))
 end
 
+local CACHE_BYTES = 262144 * 1024
+local CACHE_CHUNK = 16 * 1048576 -- po kouscich, aby 256 MB string nezabil pamet
+local CACHE_PARTS = CACHE_BYTES // CACHE_CHUNK
+
+local function cachePart(seed, i)
+	return string.format("rx_cache_%s_%02d.bin", hex(seed):sub(1, 16), i)
+end
+
+local function loadCache(seed)
+	if not FS.read then return nil end
+	local wall0 = wall()
+	local sleep0 = statSleep
+	for i = 0, CACHE_PARTS - 1 do
+		local ok, has = pcall(FS.exists, cachePart(seed, i))
+		if not ok or not has then return nil end
+	end
+	local okc, buf = pcall(buffer.create, CACHE_BYTES)
+	if not okc then return nil end
+	for i = 0, CACHE_PARTS - 1 do
+		local okr, data = pcall(FS.read, cachePart(seed, i))
+		if not okr or type(data) ~= "string" or #data ~= CACHE_CHUNK then return nil end
+		local oks, src = pcall(buffer.fromstring, data)
+		if not oks then return nil end
+		buffer.copy(buf, i * CACHE_CHUNK, src, 0, #data)
+		src, data = nil, nil -- nechame GC uvolnit docasne retezce
+		if i % 4 == 3 then pcall(FS.gc, "collect") end
+		sliceDue() -- i cteni z disku zere CPU -> drz duty
+	end
+	pcall(FS.gc, "collect")
+	pacelog("nacteni cache", wall0, sleep0)
+	return buf
+end
+
+local function saveCache(seed, buf)
+	if not FS.write then return end
+	local tmp = buffer.create(CACHE_CHUNK)
+	for i = 0, CACHE_PARTS - 1 do
+		buffer.copy(tmp, 0, buf, i * CACHE_CHUNK, CACHE_CHUNK)
+		pcall(FS.write, cachePart(seed, i), buffer.tostring(tmp))
+		if i % 4 == 3 then pcall(FS.gc, "collect") end
+		sliceDue() -- zapis 16 MB je CPU spika jako kazda jina
+	end
+	pcall(FS.gc, "collect")
+	if FS.list and FS.delete then
+		local prefix = string.format("rx_cache_%s_", hex(seed):sub(1, 16))
+		local okf, files = pcall(FS.list, "")
+		if okf and type(files) == "table" then
+			for _, f in ipairs(files) do
+				if type(f) == "string" and f:find("^rx_cache_") and f:sub(1, #prefix) ~= prefix then
+					pcall(FS.delete, f)
+				end
+			end
+		end
+	end
+end
+
 local function getCache(seed)
 	if cacheKey == seed then return cache end
-	log("stavim cache (~36 s)…")
-	local n, t, pct = 0, os.clock(), 0
+	local wall0 = wall()
+	local fromDisk = loadCache(seed)
+	if fromDisk then
+		cache, cacheKey = fromDisk, seed
+		return cache
+	end
+	log(string.format("stavim cache (pri %.0f %% duty ~%.1fx dele nez na plny vykon)…", duty * 100, 1 / duty))
+	local n, t, pct, sleep0 = 0, wall(), 0, statSleep
 	cache = argon2.initCache(blake, seed, nil, nil, function()
 		n = n + 1
 		if n % 8 == 0 then
-			local now = math.min(99, math.floor(n * 100 / 192))
+			local now = math.min(99, math.floor(n * 100 / 983))
 			if now > pct then
 				pct = now
 				log(string.format("cache %d%%", now))
 			end
-			wait()
 		end
+		sliceDue() -- budget pryc -> spi; jinak makame dal
 	end)
 	cacheKey = seed
-	log(string.format("cache hotova za %.1f s", os.clock() - t))
+	pacelog("stavba cache", t, sleep0)
+	local ts = wall()
+	saveCache(seed, cache)
+	log(string.format("cache ulozena za %.1f s (%d MB)", wall() - ts, CACHE_BYTES // 1048576))
 	return cache
 end
 
@@ -20819,6 +21015,7 @@ local function pump()
 		handle(l)
 	end
 end
+pumpHook = pump
 
 ------------------------------------------------------------------------ tezba
 
@@ -20826,7 +21023,7 @@ local function mine()
 	local seed = job.seed
 	local c = getCache(seed)
 	local nonce = math.random(0, 0x7FFFFFFF)
-	local t0 = os.clock()
+	local t0 = wall()
 
 	while job and job.seed == seed and not stop do
 		-- blob/target cti z aktualniho jobu, aby share neodchazely na stary blok
@@ -20842,7 +21039,7 @@ local function mine()
 			submit(hex(n), hex(h))
 		end
 		if done % 5 == 0 then
-			log(string.format("%d hashu, %.2f H/s", done, done / math.max(os.clock() - t0, 0.001)))
+			log(string.format("%d hashu, %.2f H/s", done, done / math.max(wall() - t0, 0.001)))
 		end
 		nonce = nonce + 1
 		if nonce > 0xFFFFFFFF then nonce = 0 end
@@ -20857,19 +21054,35 @@ end
 
 function M.run(over)
 	for k, v in pairs(over or {}) do CONFIG[k] = v end
-	rx.slicePcs = CONFIG.slicePcs
+	initFs()
+	-- jeden knob: duty. workS/minSleep se odvodi, dokud je nekdo nepretlaci.
+	local d = tonumber(CONFIG.duty) or duty
+	if d < 0.02 then d = 0.02 elseif d > 1 then d = 1 end
+	duty = d
+	frameS = tonumber(CONFIG.frameS) or frameS
+	if frameS <= 0 then frameS = 1 / 60 end
+	workS = tonumber(CONFIG.workS) or duty * frameS
+	if workS < 0.0005 then workS = 0.0005 end
+	minSleepS = CONFIG.minSleepS or math.min(frameS, workS)
+	maxSleepS = CONFIG.maxSleepS or math.max(0.1, workS * 4)
+	sliceLen = math.max(1, math.floor(tonumber(CONFIG.slicePcs) or sliceLen))
+	rx.slicePcs = sliceLen
+	rx.slice = sliceDue
 	if CONFIG.chains then rx._chains = CONFIG.chains end
 	if CONFIG.iters then rx._iters = CONFIG.iters end
 	math.randomseed(os.time() % 100000)
-	log("bridge " .. bridgeUrl() .. " wallet " .. CONFIG.wallet:sub(1, 12) .. "…")
+	log(string.format("bridge %s wallet %s… duty %.0f %% (kvantum %.1f ms, spanek ~%.0f ms)",
+		bridgeUrl(), CONFIG.wallet:sub(1, 12), duty * 100, workS * 1000, workS * (1 / duty - 1) * 1000))
 
 	while true do
 		stop = false
 		job = nil
 		cache = nil
 		cacheKey = nil
+		resetPace()
 		local ok, err = pcall(function()
-			sessionStart = os.clock()
+			sessionStart = wall()
+			lastKeep = wall()
 			ws = connect(bridgeUrl())
 			ws.OnMessage:Connect(function(data)
 				local s = tostring(data)
@@ -20913,7 +21126,7 @@ function M.run(over)
 			return { hashes = done, shares = submitted }
 		end
 		-- pool (MoneroOcean) pri opakovanych reconnectech chvili neodpovida -> backoff
-		if sessionStart and os.clock() - sessionStart > 60 then attempt = 0 end
+		if sessionStart and wall() - sessionStart > 60 then attempt = 0 end
 		attempt = attempt + 1
 		local delay = math.min(60, CONFIG.reconnectDelay * 2 ^ (attempt - 1))
 		log(string.format("reconnect za %d s (odeslano %d shares)", delay, submitted))

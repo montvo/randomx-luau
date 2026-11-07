@@ -3,6 +3,10 @@
 -- _chains/_iters, slicePcs + slice (yield kazdych N instrukci, pro executor).
 local M = {}
 
+-- yield hook pro executor: zavola se po kazdem `slicePcs` instrukci a vraci
+-- delku dalsiho useku (caller si tak ridi plynulost podle realneho casu)
+M.slice = function() end
+
 local bit32 = bit32
 local band, bor, bxor, bnot, lshift, rshift = bit32.band, bit32.bor, bit32.bxor, bit32.bnot, bit32.lshift, bit32.rshift
 local sqrt = math.sqrt
@@ -344,8 +348,9 @@ local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, sc
 		if slicePcs > 0 then
 			sliceLeft = sliceLeft - 1
 			if sliceLeft <= 0 then
+				local nxt = M.slice()
+				if type(nxt) == "number" and nxt > 0 then slicePcs = nxt end
 				sliceLeft = slicePcs
-				M.slice()
 			end
 		end
 		local k = K[pc]
@@ -447,14 +452,20 @@ function M.hash(blake, aes, ss, cache, key, input)
 	local scratch = buffer.create(ScratchpadSize)
 	local seed = blake.blake2b(input, 64)
 	local gen1 = aes.gen1R(seed)
+	local spStep = M.slicePcs or 0
+	if spStep > 0 then spStep = math.max(256, spStep * 4) end
 	for i = 0, ScratchpadSize / 64 - 1 do
+		if spStep > 0 and i % spStep == 0 then M.slice() end
 		buffer.writestring(scratch, i * 64, gen1:next())
 	end
 	local gen4 = aes.gen4R(gen1.state)
 
 	local sgen = ss.newGen(blake, key)
 	local progs = {}
-	for i = 1, 8 do progs[i] = ss.generate(sgen) end
+	for i = 1, 8 do
+		progs[i] = ss.generate(sgen)
+		if M.slicePcs and M.slicePcs > 0 then M.slice() end
+	end
 
 	local rlo, rhi, flo, fhi, elo, ehi, alo, ahi = {}, {}, {}, {}, {}, {}, {}, {}
 	local words, tgt = {}, {}
@@ -513,6 +524,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 		end
 
 		local spAddr0, spAddr1 = mx, ma
+		if M.slicePcs and M.slicePcs > 0 and chain ~= 1 then M.slice() end
 		for ic = 1, (M._iters or ProgramIterations) do
 			spAddr0 = band(bxor(spAddr0, bxor(rlo[readReg0], rlo[readReg1])), L3Mask64)
 			spAddr1 = band(bxor(spAddr1, bxor(rhi[readReg0], rhi[readReg1])), L3Mask64)
