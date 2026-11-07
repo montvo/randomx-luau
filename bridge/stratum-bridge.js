@@ -4,7 +4,10 @@
 //        [--pool gulf.moneroocean.stream:10128] [--wallet 4...] [--stats-api URL]
 // Na `/` bezi dashboard, `/api/stats` vraci JSON, WS jde na libovolnou cestu.
 const crypto = require("node:crypto");
+const fs = require("node:fs/promises");
 const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
 
 const args = process.argv.slice(2);
 const getArg = (name, def) => {
@@ -37,7 +40,7 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 // ── evidence klientu a souhrnu ────────────────────────────────────────────────
 let nextId = 1;
 const clients = new Map(); // id -> zaznam
-const totals = { sessions: 0, shares: 0, accepted: 0, rejected: 0, peak: 0 };
+const totals = { sessions: 0, shares: 0, accepted: 0, rejected: 0, peak: 0, cachePut: 0, cacheGet: 0 };
 const pendingSubmit = new Map(); // pool rpc id -> { clientId, rpcId }
 let pendingLogin = []; // cekajici klienti na odpoved poolu
 
@@ -317,6 +320,127 @@ function sendHttp(socket, status, type, body) {
 	);
 }
 
+function sendBuffer(socket, status, type, buf) {
+	socket.write(
+		`HTTP/1.1 ${status}\r\nContent-Type: ${type}\r\nContent-Length: ${buf.length}\r\n` +
+			"Connection: close\r\nCache-Control: no-store\r\n\r\n",
+	);
+	socket.end(buf);
+}
+
+// ── cache (256 MB RandomX cache na seed, sdilena mezi klienty) ───────────────
+// Argon2 cache je cista funkce seedu, takze ji nema smysl pocitat v kazdem
+// klientu: prvni ji nahraje, ostatni stahnout. Bez tohoto je cache 83 % prace
+// klienta a pri nizkem duty nestiha ani jeden blok.
+const CACHE_DIR = getArg("--cache-dir", path.join(os.tmpdir(), "rx-cache"));
+const CACHE_KEEP = Math.max(1, Number(getArg("--cache-keep", "2")));
+const CACHE_PARTS = 16; // 16 x 16 MB = 256 MB, stejne deleni jako disk cache v mineru
+const CACHE_PART = 16 * 1024 * 1024;
+const CACHE_MAX_BODY = CACHE_PART + 4096;
+const CACHE_ON = !args.includes("--no-cache");
+const seedTouch = new Map(); // seed -> posledni pouziti (pro LRU)
+
+const seedOk = (s) => /^[0-9a-f]{8,64}$/.test(s);
+const cacheDir = (seed) => path.join(CACHE_DIR, seed);
+const partFile = (seed, i) => path.join(cacheDir(seed), String(i).padStart(2, "0"));
+
+function evict() {
+	if (seedTouch.size <= CACHE_KEEP) return;
+	const old = [...seedTouch.entries()].sort((a, b) => b[1] - a[1]).slice(CACHE_KEEP);
+	for (const [seed] of old) {
+		seedTouch.delete(seed);
+		fs.rm(cacheDir(seed), { recursive: true, force: true }).catch(() => {});
+		log("cache: smazan stary seed", seed.slice(0, 8));
+	}
+}
+
+async function cacheMeta(seed) {
+	const have = [];
+	for (let i = 0; i < CACHE_PARTS; i++) {
+		const st = await fs.stat(partFile(seed, i)).catch(() => null);
+		if (st && st.size === CACHE_PART) have.push(i);
+	}
+	if (have.length) seedTouch.set(seed, Date.now());
+	return { seed, parts: CACHE_PARTS, partBytes: CACHE_PART, have, complete: have.length === CACHE_PARTS };
+}
+
+// vraci true, kdyz si request vzal socket (telo se dočte pres bodySink)
+function cacheRoute(socket, method, pathname, rest, sink) {
+	const m = /^\/cache\/([0-9a-f]{8,64})(?:\/(meta|\d+))?$/.exec(pathname);
+	if (!m) {
+		sendHttp(socket, "404 Not Found", "text/plain", "cache: neznamy tvar cesty\n");
+		return true;
+	}
+	if (!CACHE_ON) {
+		sendHttp(socket, "503 Service Unavailable", "text/plain", "cache je vypnuta (--no-cache)\n");
+		return true;
+	}
+	const seed = m[1];
+	if (m[2] === undefined || m[2] === "meta") {
+		if (method !== "GET") {
+			sendHttp(socket, "405 Method Not Allowed", "text/plain", "meta jen GET\n");
+			return true;
+		}
+		cacheMeta(seed).then((meta) => sendHttp(socket, "200 OK", "application/json", JSON.stringify(meta)));
+		return true;
+	}
+	const idx = Number(m[2]);
+	if (!(idx >= 0 && idx < CACHE_PARTS)) {
+		sendHttp(socket, "400 Bad Request", "text/plain", "index mimo 0..15\n");
+		return true;
+	}
+	if (method === "GET") {
+		fs.readFile(partFile(seed, idx))
+			.then((buf) => {
+				seedTouch.set(seed, Date.now());
+				totals.cacheGet += 1;
+				sendBuffer(socket, "200 OK", "application/octet-stream", buf);
+			})
+			.catch(() => sendHttp(socket, "404 Not Found", "text/plain", "part neni\n"));
+		return true;
+	}
+	if (method !== "PUT") {
+		sendHttp(socket, "405 Method Not Allowed", "text/plain", "jen GET/PUT\n");
+		return true;
+	}
+
+	// PUT: prijmi presne CACHE_PART bajtu (chunked se nepouziva, klient posila Content-Length)
+	const want = Number(/content-length:\s*(\d+)/i.exec(rest.header)?.[1] || 0) || CACHE_PART;
+	const chunks = [];
+	let got = 0;
+	const done = async () => {
+		sink.stop();
+		const buf = Buffer.concat(chunks, got);
+		if (buf.length !== CACHE_PART) {
+			sendHttp(socket, "400 Bad Request", "text/plain", `part ma ${buf.length} B, cekano ${CACHE_PART}\n`);
+			return;
+		}
+		try {
+			await fs.mkdir(cacheDir(seed), { recursive: true });
+			await fs.writeFile(partFile(seed, idx), buf);
+		} catch (e) {
+			sendHttp(socket, "500 Internal Server Error", "text/plain", `zapis selhal: ${e.message}\n`);
+			return;
+		}
+		seedTouch.set(seed, Date.now());
+		totals.cachePut += 1;
+		sendHttp(socket, "200 OK", "text/plain", `ok ${buf.length}\n`);
+		evict();
+	};
+	sink.set((chunk) => {
+		got += chunk.length;
+		if (got > CACHE_MAX_BODY) {
+			sink.stop();
+			sendHttp(socket, "413 Payload Too Large", "text/plain", "part je moc velka\n");
+			return;
+		}
+		chunks.push(chunk);
+		if (got >= want) done();
+	});
+	if (rest.body.length) sink.feed(rest.body);
+	return true;
+}
+
 function snapshot() {
 	const now = Date.now();
 	return {
@@ -417,6 +541,25 @@ function onConnection(socket) {
 	let open = false;
 	let client = null;
 
+	// telo PUT /cache: jeden sink na spojeni, dokud ho route nezastavi
+	const sink = {
+		fn: null,
+		set(fn) {
+			this.fn = fn;
+		},
+		stop() {
+			this.fn = null;
+		},
+		feed(chunk) {
+			if (this.fn) this.fn(chunk);
+		},
+		drain(chunk) {
+			if (!this.fn) return false;
+			this.fn(chunk);
+			return true;
+		},
+	};
+
 	const send = (obj) => {
 		try {
 			socket.write(encodeFrame(typeof obj === "string" ? obj : JSON.stringify(obj)));
@@ -471,6 +614,7 @@ function onConnection(socket) {
 	);
 
 	socket.on("data", (chunk) => {
+		if (sink.drain(chunk)) return; // telo PUT /cache
 		if (open) return parse(chunk);
 		head = Buffer.concat([head, chunk]);
 		const end = head.indexOf("\r\n\r\n");
@@ -480,9 +624,11 @@ function onConnection(socket) {
 		const key = /sec-websocket-key:\s*(\S+)/i.exec(request)?.[1];
 
 		if (!/upgrade:\s*websocket/i.test(request)) {
-			const path = (/^[A-Z]+ (\S+)/.exec(request)?.[1] || "/").split("?")[0];
-			if (path === "/api/stats") return sendHttp(socket, "200 OK", "application/json", JSON.stringify(snapshot()));
-			if (path === "/" || path === "/index.html") return sendHttp(socket, "200 OK", "text/html; charset=utf-8", dashboard());
+			const method = (/^([A-Z]+) /.exec(request)?.[1] || "GET").toUpperCase();
+			const pathname = (/^[A-Z]+ (\S+)/.exec(request)?.[1] || "/").split("?")[0];
+			if (cacheRoute(socket, method, pathname, { header: request, body: rest }, sink)) return;
+			if (pathname === "/api/stats") return sendHttp(socket, "200 OK", "application/json", JSON.stringify(snapshot()));
+			if (pathname === "/" || pathname === "/index.html") return sendHttp(socket, "200 OK", "text/html; charset=utf-8", dashboard());
 			return sendHttp(socket, "200 OK", "text/plain", "stratum bridge\n");
 		}
 
@@ -523,6 +669,7 @@ server.on("error", (e) => {
 server.listen(LISTEN, BIND, () => {
 	log(`bridge listening on ws://${BIND}:${LISTEN} ->`, POOL);
 	log(FORCED_WALLET ? `penizenka vynucena: ${FORCED_WALLET}` : "penizenka: bere se z klienta");
+	log(CACHE_ON ? `cache endpoint: ${CACHE_DIR} (drzim ${CACHE_KEEP} seedy, ${CACHE_PARTS} x ${CACHE_PART / 1048576} MB)` : "cache endpoint vypnut");
 	refreshPoolStats();
 	poolConnect(true);
 });

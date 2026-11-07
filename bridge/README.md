@@ -43,4 +43,28 @@ vsechno tezi na jednu adresu; puvodni adresa klienta zustava v dashboardu.
 
 - Jeden uzivatel = jedno WS spojeni = jedno TCP do poolu. Pool ma limity na IP.
 - Kdo zna URL, muze most pouzit (tezi ale na svou penizenku).
-- `getCache` nikam necachuje, kazdy klient si stavi vlastni cache.
+
+
+## Sdilena cache (`/cache/<seed>/…`)
+
+RandomX cache je 256 MB a je cista funkce seedu bloku — pocitat ji v kazdem
+klientu je 83 % veskere prace klienta a 30 klientu tak dela 30× totéž. Bridge ji
+proto drzi na disku a rozdalava:
+
+| cesta | metoda | vysledek |
+|---|---|---|
+| `/cache/<seed>/meta` | GET | `{parts, partBytes, have[], complete}` |
+| `/cache/<seed>/<0-15>` | GET | dil, `application/octet-stream` |
+| `/cache/<seed>/<0-15>` | PUT | prijme dil (telo = presne 16 MB) |
+
+Miner zkusi `/meta` jako prvni; kdyz je cache kompletni, stahne ji a Argon2
+vubec nepusti. Kdyz ji ma z disku nebo ji postavi, chybejici dily nahraje zpet.
+
+- `--cache-dir` (env `CACHE_DIR`), default `os.tmpdir()/rx-cache` — v kontejneru
+  dej volume, jinak cache zmizi pri restartu.
+- `--cache-keep N` (default 2) — kolik poslednich seedu drzet; starsi se maze.
+  Jeden seed = 256 MB, takze pri 2 seedech pocitej s 512 MB disku.
+- `--no-cache` — endpointy vypne, klienti budou pocitat sami.
+- Klient cache nahrava jen kdyz ji bridge jeste nema; pozdejsi klienti preskoci.
+- Pozadavky pres Caddy prochazi bez zmeny (`reverse_proxy` prenasi i PUT).
+- Bez limitu na velikost tela to neni verejna sluzba: kdokoliv muze poslat 16 MB.
