@@ -11,7 +11,7 @@ Stav: **hash se shoduje s C referencí bit po bitu** — všech 8 chainů × 204
 ## Struktura
 
 - `src/` — `rx.lua` (VM: decode, exec, hash) a kryptoprimitivy (`blake2b`, `aes`, `argon2`, `superscalar`)
-- `tests/` — vektory a per-primitiva testy (`t_rx`, `t_trace`, `t_mul`, `t_rcp`, `t_add`, `t_sq`)
+- `tests/` — vektory a per-primitiva testy (`t_rx`, `t_repeat`, `t_mul64`, `t_scdiff`, `t_compile`, `t_trace`, `t_mul`, `t_rcp`, `t_add`, `t_sq`)
 - `diagnostics/` — hash stavu po iteraci, trace a zkracování běhu (`t_rg`, `t_rg2`, `t_rg8`, `t_rf`, `t_sp`, `t_blob`, `t_pc`, `t_dbg`)
 - `c-ref/` — `trace.cpp`, protistrana pro `tevador/RandomX` (`librandomx.a`)
 - `bridge/` — `stratum-bridge.js`, WebSocket → pool TCP pro reálné shares
@@ -96,6 +96,10 @@ tools/bundle.py` (staví i `miner.test.lua` pro `tests/t_miner.lua`).
 cd tests
 luau t_rx.lua -a 00 00000000000000000000000000000000 19041669a22e3d48a25741aa92fdc5289204170ec778edb8d42c31a4b42c04d7
 luau t_trace.lua -a 00 00000000000000000000000000000000
+luau t_repeat.lua  # ctyri hashe za sebou musi dat stejny vystup (unik fprc/rcpCache)
+luau t_mul64.lua   # mul64lo proti referenci
+luau t_scdiff.lua  # kompilovane superscalar programy vs. interpreter
+luau t_compile.lua # kompilace i fallback (M.noCompile) musi dat stejny hash
 luau t_miner.lua   # integrace: login, job, hash, submit
 luau t_pace.lua    # duty throttle: cil 10 %, clamping, duty=1 nespi
 luau t_cache.lua   # sdilena cache: stazeni z bridge, upload po vlastni stavbe

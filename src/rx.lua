@@ -101,19 +101,17 @@ local function fsqrt(x)
 	return applyRound(s, (x - p) - prodErr(s, s, p))
 end
 
+-- Bez vetveni: `//` je podlahove deleni (0 nebo 1, resp. -1) a `%` uz vyjde
+-- nezaporne, takze odpadá i podminka u vyssiho limbuse.
 local function ad64(alo, ahi, blo, bhi)
 	local lo = alo + blo
-	local carry = 0
-	if lo >= W then lo = lo - W carry = 1 end
-	local hi = ahi + bhi + carry
-	return lo, (hi >= W and hi - W or hi)
+	local hi = ahi + bhi + lo // W
+	return lo % W, hi % W
 end
 local function sb64(alo, ahi, blo, bhi)
 	local lo = alo - blo
-	local borrow = 0
-	if lo < 0 then lo = lo + W borrow = 1 end
-	local hi = ahi - bhi - borrow
-	return lo, (hi < 0 and hi + W or hi)
+	local hi = ahi - bhi + lo // W
+	return lo % W, hi % W
 end
 local function mulLimbs(alo, ahi, blo, bhi)
 	local a0 = alo % 65536 local a1 = (alo - a0) / 65536
@@ -145,9 +143,20 @@ local function mulLimbs(alo, ahi, blo, bhi)
 	return o0, o1, o2, o3, o4, o5, o6, o7
 end
 
+-- Jen spodních 64 bitů (vyšší členy se do nich nepropíšou, řetěz končí po
+-- limbusi 2). Limby po 22 bitech: tři se vejdou do 53bitove mantisy presne,
+-- takze staci 6 násobení místo 16.
+local B22 = 4194304
 local function mul64lo(alo, ahi, blo, bhi)
-	local o0, o1, o2, o3, o4, o5 = mulLimbs(alo, ahi, blo, bhi)
-	return o0 + o1 * 65536, o2 + o3 * 65536
+	local a0 = alo % B22 local a1 = alo // B22 + (ahi % 4096) * 1024 local a2 = ahi // 4096
+	local b0 = blo % B22 local b1 = blo // B22 + (bhi % 4096) * 1024 local b2 = bhi // 4096
+	local t = a0 * b0
+	local o0 = t % B22
+	t = a0 * b1 + a1 * b0 + (t - o0) / B22
+	local o1 = t % B22
+	t = a0 * b2 + a1 * b1 + a2 * b0 + (t - o1) / B22
+	local l = o0 + o1 * B22
+	return l % W, (l // W + (t % B22 % 1048576) * 4096) % W
 end
 
 local function mul64hi(alo, ahi, blo, bhi)
@@ -275,7 +284,140 @@ local function decodeWords(words)
 	return K, D, S, M, ILO, IHI, TGT, MASK, ZEROBASE
 end
 
+-- Superscalar program je prima cara bez vetveni: prelozi se do jedne Luau
+-- funkce, takze v tele neni zadny dispatch podle op a zadne cteni ins[j].
+-- Konstanty, posuny i reciprokni hodnoty jsou predpocitane v kodu. Kdyz
+-- loadstring neni (nebo kompilace selze), runSuperscalar vezme interpreter.
+local function compileProg(prog)
+	if M.noCompile then return nil end
+	local ok, ls = pcall(function() return loadstring end)
+	if not ok then return nil end
+	local ls2 = loadstring or ls
+	if type(ls2) ~= "function" then return nil end
+	local lines = {}
+	-- ad64/sb64 rozbalene na miste; operandy jsou bud "rlo[i]"/"rhi[i]", nebo cisla
+	local function emit63(sign, d, aLo, aHi, bLo, bHi)
+		local lo, hi = "q1", "q2"
+		if sign == "-" then
+			lines[#lines + 1] = string.format("%s = %s - %s", lo, aLo, bLo)
+			lines[#lines + 1] = string.format("%s = %s - %s + %s // 4294967296", hi, aHi, bHi, lo)
+		else
+			lines[#lines + 1] = string.format("%s = %s + %s", lo, aLo, bLo)
+			lines[#lines + 1] = string.format("%s = %s + %s + %s // 4294967296", hi, aHi, bHi, lo)
+		end
+		lines[#lines + 1] = string.format("rlo[%d] = %s %% 4294967296", d, lo)
+		lines[#lines + 1] = string.format("rhi[%d] = %s %% 4294967296", d, hi)
+	end
+	-- mul64lo rozbaleny na miste (3 limby po 22 bitech, jen spodních 64 bitů)
+	local function emitMul(d, aLo, aHi, bLo, bHi)
+		local a0, a1, a2, b0, b1, b2, t, o = "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"
+		local L = lines
+		L[#L + 1] = string.format("%s = %s %% 4194304", a0, aLo)
+		L[#L + 1] = string.format("%s = %s // 4194304 + (%s %% 4096) * 1024", a1, aLo, aHi)
+		L[#L + 1] = string.format("%s = %s // 4096", a2, aHi)
+		L[#L + 1] = string.format("%s = %s %% 4194304", b0, bLo)
+		L[#L + 1] = string.format("%s = %s // 4194304 + (%s %% 4096) * 1024", b1, bLo, bHi)
+		L[#L + 1] = string.format("%s = %s // 4096", b2, bHi)
+		L[#L + 1] = string.format("%s = %s * %s", t, a0, b0)
+		L[#L + 1] = string.format("%s = %s %% 4194304", o, t)
+		L[#L + 1] = string.format("rlo[%d] = %s", d, o)
+		L[#L + 1] = string.format("%s = %s * %s + %s * %s + (%s - %s) / 4194304", t, a0, b1, a1, b0, t, o)
+		L[#L + 1] = string.format("%s = %s %% 4194304", o, t)
+		L[#L + 1] = string.format("rlo[%d] = rlo[%d] + %s * 4194304", d, d, o)
+		L[#L + 1] = string.format("%s = %s * %s + %s * %s + %s * %s + (%s - %s) / 4194304", t, a0, b2, a1, b1, a2, b0, t, o)
+		L[#L + 1] = string.format("rhi[%d] = (rlo[%d] // 4294967296 + (%s %% 4194304 %% 1048576) * 4096) %% 4294967296", d, d, t)
+		L[#L + 1] = string.format("rlo[%d] = rlo[%d] %% 4294967296", d, d)
+	end
+	local ins = prog.ins
+	for j = 1, prog.size do
+		local i2 = ins[j]
+		local op, d, s = i2.op, i2.dst + 1, i2.src + 1
+		if op == 0 then
+			emit63("-", d, string.format("rlo[%d]", d), string.format("rhi[%d]", d), string.format("rlo[%d]", s), string.format("rhi[%d]", s))
+		elseif op == 1 then
+			lines[#lines + 1] = string.format("rlo[%d] = bxor(rlo[%d], rlo[%d]) rhi[%d] = bxor(rhi[%d], rhi[%d])", d, d, s, d, d, s)
+		elseif op == 2 then
+			local n = rshift(i2.mod, 2) % 4
+			if n == 0 then
+				emit63("+", d, string.format("rlo[%d]", d), string.format("rhi[%d]", d), string.format("rlo[%d]", s), string.format("rhi[%d]", s))
+			else
+				emit63("+", d, string.format("rlo[%d]", d), string.format("rhi[%d]", d),
+					string.format("lshift(rlo[%d], %d)", s, n), string.format("bor(lshift(rhi[%d], %d), rshift(rlo[%d], %d))", s, n, s, 32 - n))
+			end
+		elseif op == 3 then
+			emitMul(d, string.format("rlo[%d]", d), string.format("rhi[%d]", d), string.format("rlo[%d]", s), string.format("rhi[%d]", s))
+		elseif op == 4 then
+			local n = i2.imm % 64
+			if n == 0 then
+				lines[#lines + 1] = ""
+			elseif n >= 32 then
+				n = n - 32
+				-- prohozeni a pak uz jen n-rotace
+				lines[#lines + 1] = string.format("rlo[%d], rhi[%d] = rhi[%d], rlo[%d] rlo[%d], rhi[%d] = bor(rshift(rlo[%d], %d), lshift(rhi[%d], %d)), bor(rshift(rhi[%d], %d), lshift(rlo[%d], %d))",
+					d, d, d, d, d, d, d, n, d, 32 - n, d, n, d, 32 - n)
+			else
+				lines[#lines + 1] = string.format("rlo[%d], rhi[%d] = bor(rshift(rlo[%d], %d), lshift(rhi[%d], %d)), bor(rshift(rhi[%d], %d), lshift(rlo[%d], %d))",
+					d, d, d, n, d, 32 - n, d, n, d, 32 - n)
+			end
+		elseif op == 5 or op == 7 or op == 9 then
+			local alo, ahi = signExt(i2.imm)
+			emit63("+", d, string.format("rlo[%d]", d), string.format("rhi[%d]", d), tostring(alo), tostring(ahi))
+		elseif op == 6 or op == 8 or op == 10 then
+			local alo, ahi = signExt(i2.imm)
+			lines[#lines + 1] = string.format("rlo[%d] = bxor(rlo[%d], %d) rhi[%d] = bxor(rhi[%d], %d)", d, d, alo, d, d, ahi)
+		elseif op == 11 then
+			lines[#lines + 1] = string.format("rlo[%d], rhi[%d] = mul64hi(rlo[%d], rhi[%d], rlo[%d], rhi[%d])", d, d, d, d, s, s)
+		elseif op == 12 then
+			lines[#lines + 1] = string.format("rlo[%d], rhi[%d] = smulh(rlo[%d], rhi[%d], rlo[%d], rhi[%d])", d, d, d, d, s, s)
+		elseif op == 13 then
+			local xlo, xhi = reciprocal(i2.imm)
+			emitMul(d, string.format("rlo[%d]", d), string.format("rhi[%d]", d), tostring(xlo), tostring(xhi))
+		else
+			return nil -- nezname op -> interpreter
+		end
+	end
+	local src = "local sb64, ad64, mul64lo, mul64hi, smulh, lshift, rshift, bor, bxor = ...\n" ..
+		"return function(rlo, rhi)\nlocal q1, q2, q3, q4, q5, q6, q7, q8\n" .. table.concat(lines, "\n") .. "\nend"
+	local chunk = ls2(src)
+	if type(chunk) ~= "function" then return nil end
+	local okc, fn = pcall(chunk, sb64, ad64, mul64lo, mul64hi, smulh, lshift, rshift, bor, bxor)
+	if not okc or type(fn) ~= "function" then return nil end
+	prog.src = src
+	return fn
+end
+
 local function runSuperscalar(prog, rlo, rhi)
+	local fn = prog.fn
+	if fn == nil then
+		fn = compileProg(prog) or false
+		prog.fn = fn
+	end
+	if fn then return fn(rlo, rhi) end
+	-- mul64lo rozbaleny na miste (jen spodnich 64 bitu, zadny call)
+	local function emitMul(d, aLo, aHi, bLo, bHi)
+		local a0, a1, a2, a3, b0, b1, b2, b3, t, o = "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"
+		local L = lines
+		L[#L + 1] = string.format("%s = %s %% 65536", a0, aLo)
+		L[#L + 1] = string.format("%s = (%s - %s) / 65536", a1, aLo, a0)
+		L[#L + 1] = string.format("%s = %s %% 65536", a2, aHi)
+		L[#L + 1] = string.format("%s = (%s - %s) / 65536", a3, aHi, a2)
+		L[#L + 1] = string.format("%s = %s %% 65536", b0, bLo)
+		L[#L + 1] = string.format("%s = (%s - %s) / 65536", b1, bLo, b0)
+		L[#L + 1] = string.format("%s = %s %% 65536", b2, bHi)
+		L[#L + 1] = string.format("%s = (%s - %s) / 65536", b3, bHi, b2)
+		L[#L + 1] = string.format("%s = %s * %s", t, a0, b0)
+		L[#L + 1] = string.format("%s = %s %% 65536", o, t)
+		L[#L + 1] = string.format("rlo[%d] = %s", d, o)
+		L[#L + 1] = string.format("%s = %s * %s + %s * %s + (%s - %s) / 65536", t, a0, b1, a1, b0, t, o)
+		L[#L + 1] = string.format("%s = %s %% 65536", o, t)
+		L[#L + 1] = string.format("rlo[%d] = rlo[%d] + %s * 65536", d, d, o)
+		L[#L + 1] = string.format("%s = %s * %s + %s * %s + %s * %s + (%s - %s) / 65536", t, a0, b2, a1, b1, a2, b0, t, o)
+		L[#L + 1] = string.format("%s = %s %% 65536", o, t)
+		L[#L + 1] = string.format("rhi[%d] = %s", d, o)
+		L[#L + 1] = string.format("%s = %s * %s + %s * %s + %s * %s + %s * %s + (%s - %s) / 65536", t, a0, b3, a1, b2, a2, b1, a3, b0, t, o)
+		L[#L + 1] = string.format("%s = %s %% 65536", o, t)
+		L[#L + 1] = string.format("rhi[%d] = rhi[%d] + %s * 65536", d, d, o)
+	end
 	local ins = prog.ins
 	for j = 1, prog.size do
 		local i2 = ins[j]
@@ -358,63 +500,93 @@ local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, sc
 		local s = S[pc]
 		local mod = MU[pc]
 		
-		if k == 1 then
-			local slo, shi = shl64(rlo[s], rhi[s], rshift(mod, 2) % 4)
-			if d == 6 then slo, shi = ad64(slo, shi, ILO[pc], IHI[pc]) end
-			rlo[d], rhi[d] = ad64(rlo[d], rhi[d], slo, shi)
-		elseif k == 2 or k == 4 or k == 6 or k == 8 or k == 10 or k == 14 then
-			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
-			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
-			if k == 2 then rlo[d], rhi[d] = ad64(rlo[d], rhi[d], mlo, mhi)
-			elseif k == 4 then rlo[d], rhi[d] = sb64(rlo[d], rhi[d], mlo, mhi)
-			elseif k == 6 then rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], mlo, mhi)
-			elseif k == 8 then rlo[d], rhi[d] = mul64hi(rlo[d], rhi[d], mlo, mhi)
-			elseif k == 10 then rlo[d], rhi[d] = smulh(rlo[d], rhi[d], mlo, mhi)
-			else rlo[d] = bxor(rlo[d], mlo) rhi[d] = bxor(rhi[d], mhi) end
+		-- Vetve jsou serazene podle frekvence (decodeWords na nahodnych seedech),
+		-- aby se bezne instrukce dostaly k sosnu po par comparech.
+		if k == 24 then
+			elo[d] = fprod(elo[d], alo[s]) ehi[d] = fprod(ehi[d], ahi[s])
+		elseif k == 27 then
+			local q1 = rlo[d] + ILO[pc]
+			local q2 = rhi[d] + IHI[pc] + q1 // W
+			rlo[d], rhi[d] = q1 % W, q2 % W
+			if M.debug then M.debug(string.format('cb d=%d ilo=%08x pc=%d tgt=%d', d, ILO[pc], pc, TGT[pc])) end
+			if band(rlo[d], lshift(ConditionMask, rshift(mod, 4) + ConditionOffset)) == 0 then pc = TGT[pc] end
+		elseif k == 29 then
+			local addr = band(rlo[d] + ILO[pc], MASK[pc])
+			buffer.writeu32(scratch, addr, rlo[s])
+			buffer.writeu32(scratch, addr + 4, rhi[s])
 		elseif k == 3 then
-			if s ~= d then rlo[d], rhi[d] = sb64(rlo[d], rhi[d], rlo[s], rhi[s])
-			else rlo[d], rhi[d] = sb64(rlo[d], rhi[d], ILO[pc], IHI[pc]) end
+			local alo, ahi, blo, bhi
+			if s ~= d then alo, ahi, blo, bhi = rlo[d], rhi[d], rlo[s], rhi[s]
+			else alo, ahi, blo, bhi = rlo[d], rhi[d], ILO[pc], IHI[pc] end
+			local q1 = alo - blo
+			local q2 = ahi - bhi + q1 // W
+			rlo[d], rhi[d] = q1 % W, q2 % W
+		elseif k == 21 then
+			flo[d] = fsub(flo[d], alo[s]) fhi[d] = fsub(fhi[d], ahi[s])
+		elseif k == 1 then
+			local slo, shi = shl64(rlo[s], rhi[s], rshift(mod, 2) % 4)
+			if d == 6 then
+				local t1 = slo + ILO[pc]
+				shi = shi + IHI[pc] + t1 // W
+				slo = t1 % W
+			end
+			local q1 = rlo[d] + slo
+			local q2 = rhi[d] + shi + q1 // W
+			rlo[d], rhi[d] = q1 % W, q2 % W
+		elseif k == 19 then
+			flo[d] = fadd(flo[d], alo[s]) fhi[d] = fadd(fhi[d], ahi[s])
 		elseif k == 5 then
 			if s ~= d then rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], rlo[s], rhi[s])
 			else rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], ILO[pc], IHI[pc]) end
-		elseif k == 7 then rlo[d], rhi[d] = mul64hi(rlo[d], rhi[d], rlo[s], rhi[s])
-		elseif k == 9 then rlo[d], rhi[d] = smulh(rlo[d], rhi[d], rlo[s], rhi[s])
-		elseif k == 11 then
-			local xlo, xhi = reciprocal(words[pc][5])
-			rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], xlo, xhi)
-		elseif k == 12 then rlo[d], rhi[d] = neg64(rlo[d], rhi[d])
 		elseif k == 13 then
 			if s ~= d then rlo[d] = bxor(rlo[d], rlo[s]) rhi[d] = bxor(rhi[d], rhi[s])
 			else rlo[d] = bxor(rlo[d], ILO[pc]) rhi[d] = bxor(rhi[d], IHI[pc]) end
 		elseif k == 15 then
 			if s ~= d then rlo[d], rhi[d] = rotr64(rlo[d], rhi[d], rlo[s] % 64)
 			else rlo[d], rhi[d] = rotr64(rlo[d], rhi[d], words[pc][5] % 64) end
-		elseif k == 16 then
-			if s ~= d then rlo[d], rhi[d] = rotl64(rlo[d], rhi[d], rlo[s] % 64)
-			else rlo[d], rhi[d] = rotl64(rlo[d], rhi[d], words[pc][5] % 64) end
-		elseif k == 17 then
-			if s ~= d then rlo[d], rhi[d], rlo[s], rhi[s] = rlo[s], rhi[s], rlo[d], rhi[d] end
-		elseif k == 18 then
-			if d < 4 then flo[d + 1], fhi[d + 1] = fhi[d + 1], flo[d + 1] else elo[d - 3], ehi[d - 3] = ehi[d - 3], elo[d - 3] end
-		elseif k == 19 then
-			flo[d] = fadd(flo[d], alo[s]) fhi[d] = fadd(fhi[d], ahi[s])
+		elseif k == 11 then
+			local xlo, xhi = reciprocal(words[pc][5])
+			rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], xlo, xhi)
+		elseif k == 4 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			local q1 = rlo[d] - mlo
+			local q2 = rhi[d] - mhi + q1 // W
+			rlo[d], rhi[d] = q1 % W, q2 % W
+		elseif k == 2 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			local q1 = rlo[d] + mlo
+			local q2 = rhi[d] + mhi + q1 // W
+			rlo[d], rhi[d] = q1 % W, q2 % W
+		elseif k == 23 then
+			local lo, hi = f2b(flo[d]) flo[d] = b2f(lo, bxor(hi, 0x80F00000))
+			lo, hi = f2b(fhi[d]) fhi[d] = b2f(lo, bxor(hi, 0x80F00000))
+		elseif k == 26 then
+			if M.debug then M.debug(string.format("fsqrt pc=%d fprc=%d x0=%d x1=%d", pc, fprc, elo[d], ehi[d])) end
+			if M.traceE2 then local a1, a2 = f2b(elo[d]) local b1, b2 = f2b(ehi[d]) print(string.format("FS in pc=%d %08x,%08x %08x,%08x", pc, a1, a2, b1, b2)) end
+			elo[d] = fsqrt(elo[d]) ehi[d] = fsqrt(ehi[d])
+			if M.traceE2 then local a1, a2 = f2b(elo[d]) local b1, b2 = f2b(ehi[d]) print(string.format("FS out pc=%d %08x,%08x %08x,%08x", pc, a1, a2, b1, b2)) end
 		elseif k == 20 then
 			local addr = band(rlo[s] + ILO[pc], MASK[pc])
 			if M.debug then M.debug(string.format("faddm pc=%d d=%d addr=%x p0=%d p1=%d", pc, d, addr, flo[d], fhi[d])) end
 			flo[d] = fadd(flo[d], buffer.readi32(scratch, addr))
 			fhi[d] = fadd(fhi[d], buffer.readi32(scratch, addr + 4))
 			if M.debug then M.debug(string.format("after d=%d lo=%d hi=%d", d, flo[d], fhi[d])) end
-		elseif k == 21 then
-			flo[d] = fsub(flo[d], alo[s]) fhi[d] = fsub(fhi[d], ahi[s])
 		elseif k == 22 then
 			local addr = band(rlo[s] + ILO[pc], MASK[pc])
 			flo[d] = fsub(flo[d], buffer.readi32(scratch, addr))
 			fhi[d] = fsub(fhi[d], buffer.readi32(scratch, addr + 4))
-		elseif k == 23 then
-			local lo, hi = f2b(flo[d]) flo[d] = b2f(lo, bxor(hi, 0x80F00000))
-			lo, hi = f2b(fhi[d]) fhi[d] = b2f(lo, bxor(hi, 0x80F00000))
-		elseif k == 24 then
-			elo[d] = fprod(elo[d], alo[s]) ehi[d] = fprod(ehi[d], ahi[s])
+		elseif k == 14 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			rlo[d] = bxor(rlo[d], mlo) rhi[d] = bxor(rhi[d], mhi)
+		elseif k == 17 then
+			if s ~= d then rlo[d], rhi[d], rlo[s], rhi[s] = rlo[s], rhi[s], rlo[d], rhi[d] end
+		elseif k == 6 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			rlo[d], rhi[d] = mul64lo(rlo[d], rhi[d], mlo, mhi)
 		elseif k == 25 then
 			local addr = band(rlo[s] + ILO[pc], MASK[pc])
 			local m1, m2 = eMask[1][1], eMask[1][2]
@@ -424,27 +596,36 @@ local function execProgram(K, D, S, MU, ILO, IHI, TGT, MASK, ZEROBASE, words, sc
 			x1, x2 = f2b(buffer.readi32(scratch, addr + 4))
 			local d2 = b2f(bor(x1, m1), bor(band(x2, 0xFFFFFF), m2))
 			elo[d] = fdiv(elo[d], d1) ehi[d] = fdiv(ehi[d], d2)
-		elseif k == 26 then
-			if M.debug then M.debug(string.format("fsqrt pc=%d fprc=%d x0=%d x1=%d", pc, fprc, elo[d], ehi[d])) end
-			elo[d] = fsqrt(elo[d]) ehi[d] = fsqrt(ehi[d])
-		elseif k == 27 then
-			rlo[d], rhi[d] = ad64(rlo[d], rhi[d], ILO[pc], IHI[pc])
-			if M.debug then M.debug(string.format('cb d=%d ilo=%08x pc=%d tgt=%d', d, ILO[pc], pc, TGT[pc])) end
-			if band(rlo[d], lshift(ConditionMask, rshift(mod, 4) + ConditionOffset)) == 0 then pc = TGT[pc] end
+		elseif k == 18 then
+			if d < 4 then flo[d + 1], fhi[d + 1] = fhi[d + 1], flo[d + 1] else elo[d - 3], ehi[d - 3] = ehi[d - 3], elo[d - 3] end
+		elseif k == 7 then rlo[d], rhi[d] = mul64hi(rlo[d], rhi[d], rlo[s], rhi[s])
+		elseif k == 9 then rlo[d], rhi[d] = smulh(rlo[d], rhi[d], rlo[s], rhi[s])
+		elseif k == 12 then rlo[d], rhi[d] = neg64(rlo[d], rhi[d])
+		elseif k == 16 then
+			if s ~= d then rlo[d], rhi[d] = rotl64(rlo[d], rhi[d], rlo[s] % 64)
+			else rlo[d], rhi[d] = rotl64(rlo[d], rhi[d], words[pc][5] % 64) end
+		elseif k == 10 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			rlo[d], rhi[d] = smulh(rlo[d], rhi[d], mlo, mhi)
+		elseif k == 8 then
+			local addr = band((ZEROBASE[pc] and 0 or rlo[s]) + ILO[pc], MASK[pc])
+			local mlo, mhi = buffer.readu32(scratch, addr), buffer.readu32(scratch, addr + 4)
+			rlo[d], rhi[d] = mul64hi(rlo[d], rhi[d], mlo, mhi)
 		elseif k == 28 then
 			local r1 = rotr64(rlo[s], rhi[s], words[pc][5] % 64)
 			fprc = band(r1, 3)
-		elseif k == 29 then
-			local addr = band(rlo[d] + ILO[pc], MASK[pc])
-			buffer.writeu32(scratch, addr, rlo[s])
-			buffer.writeu32(scratch, addr + 4, rhi[s])
 		end
 		if hook then hook(pc) end
 		pc = pc + 1
 	end
 
 end
+M._mullo = mul64lo
+M._recip = reciprocal
+M._clearRcp = function() rcpCache = {} end
 M._exec = execProgram
+M._runsuper = runSuperscalar
 M.datasetItem = datasetItem
 M.decodeWords = decodeWords
 
@@ -458,8 +639,13 @@ function M.hash(blake, aes, ss, cache, key, input)
 		if spStep > 0 and i % spStep == 0 then M.slice() end
 		buffer.writestring(scratch, i * 64, gen1:next())
 	end
+	if M.traceFill then print("FILL:" .. (blake.blake2b(buffer.readstring(scratch, 0, ScratchpadSize), 8):gsub('.', function(c) return string.format('%02x', string.byte(c)) end))) end
+	-- referencni randomx_calculate_hash() vola resetRoundingMode() jednou na hash
+	-- (pred smyckou chainu); bez toho by se fprc prenasi mezi hashi
+	fprc = 0
 	local gen4 = aes.gen4R(gen1.state)
 
+	if M.traceBlob then print("GEN1STATE:" .. (gen1.state:gsub('.', function(c) return string.format('%02x', string.byte(c)) end)):sub(1, 16) .. " SEED:" .. (seed:gsub('.', function(c) return string.format('%02x', string.byte(c)) end)):sub(1, 16)) end
 	local sgen = ss.newGen(blake, key)
 	local progs = {}
 	for i = 1, 8 do
@@ -476,7 +662,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 		local parts = {}
 		for i = 1, 34 do parts[i] = gen4:next() end
 		local blob = buffer.fromstring(table.concat(parts))
-		if M.traceBlob then print("BLOB:" .. (blob and (buffer.readstring(blob, 0, 8):gsub('.', function(c) return string.format('%02x', string.byte(c)) end)))) end
+		if M.traceBlob then print("BLOB:" .. (blake.blake2b(buffer.readstring(blob, 0, buffer.len(blob)), 8):gsub('.', function(c) return string.format('%02x', string.byte(c)) end))) end
 		local ent = {}
 		for i = 0, 15 do ent[i] = { buffer.readu32(blob, i * 8), buffer.readu32(blob, i * 8 + 4) } end
 		local function small(lo, hi)
@@ -547,6 +733,7 @@ function M.hash(blake, aes, ss, cache, key, input)
 				local m1, m2 = eMask[1][1], eMask[1][2]
 				local x1, x2 = f2b(buffer.readi32(scratch, o2))
 				elo[i] = b2f(bor(x1, m1), bor(band(x2, 0xFFFFFF), m2))
+				if M.traceE and ic <= 1 then print(string.format("E it%d i%d o2=%x raw=%08x,%08x mask=%08x,%08x -> %08x,%08x", ic, i, o2, x1, x2, m1, m2, bor(x1, m1), bor(band(x2, 0xFFFFFF), m2))) end
 				m1, m2 = eMask[2][1], eMask[2][2]
 				x1, x2 = f2b(buffer.readi32(scratch, o2 + 4))
 				ehi[i] = b2f(bor(x1, m1), bor(band(x2, 0xFFFFFF), m2))

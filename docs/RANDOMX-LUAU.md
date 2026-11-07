@@ -87,8 +87,10 @@ Pak tutéž iteraci rozebrat per-pc trace (sekce 6.3).
 - `runSuperscalar`, `datasetItem` (`DST_CONST`, reciproké násobení).
 - `execProgram` — celý interpreter vč. per-instruction `hook` pro trace.
 - `hash(blake, aes, ss, cache, key, input)` — hlavička, chain loop, finální AES+blake2b.
-- Debug háčky: `M.traceSp` (hash scratchpadu), `M.traceReg`, `M.traceRF`,
-  `M._chains` / `M._iters` (zkrácení běhu).
+- Debug háčky: `M.traceSp` (hash scratchpadu), `M.traceReg`, `M.traceRF`, `M.traceFill`
+  (hash naplněného scratchpadu), `M._chains` / `M._iters` (zkrácení běhu),
+  `M.noCompile` (vypne kompilaci superscalar programů), `M._mullo` / `M._recip`
+  (exporty primitiv pro testy).
 
 Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje):
 
@@ -103,6 +105,10 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
   `s ~= d`; IMUL_RCP jen když dělitel není mocnina dvou.
 - `CacheLineAlignMask = (DATASET_BASE_SIZE - 1) & ~63 = 0x7FFFFFC0`.
 - `nreg.r` se nuluje **na začátku každého chainu**, ne jednou pro celý hash.
+- `fprc` (režim zaokrouhlování) se resetuje **jednou na hash**, hned po naplnění
+  scratchpadu a před chain loopem — reference tam volá `machine->resetRoundingMode()`.
+  Přes chainy i iterace naopak přetrvává. Bez resetu se druhý a každý další hash
+  ve stejném procesu liší v posledním bitu `e` registrů (a vyjde jiný hash).
 - FSWAP přehazuje **lane v registru** (`_mm_shuffle_pd(a,a,1)`), ne registry.
 - FSCAL xoruje masku `0x80F0000000000000` do obou lane.
 - `eMask` = `getStaticExponent`: `expo = bor(0x300, lshift(band(rshift(hi,28),0xF),4))`
@@ -146,7 +152,9 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
    (`pc`, `r`, `f`, `e`). Dokud se jedna iterace neshoduje, nic dalšího nemá smysl.
 4. Pomocné dumpy: `sp:` (blake2b celého scratchpadu před store zpět), `CH<n>` (hash
    64KiB bloku), `POSTIT`, `FILL0`, `FSTORE`, `SPB`.
-5. Pozor na pozorovací body: C tiskne `sp:` a `f2/e2` **před** dataset readem a store zpět,
+5. `t_repeat.lua` po každé změně, která se dotkne sdíleného stavu: chytí to únik
+   `fprc` (i `rcpCache`). Regrese se projeví až od ~128 iterací, proto 512.
+6. Pozor na pozorovací body: C tiskne `sp:` a `f2/e2` **před** dataset readem a store zpět,
    takže Luau musí tisknout na stejných místech, jinak se porovnávají různé stavy.
 
 ## 7. Odchylky nástrojů (šetří čas)
@@ -157,6 +165,25 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 - `clang++` na arm64 Macu: `xmmintrin.h` v `trace.cpp` odstranit.
 - `sed -i ''`, žádné GNU `sed`.
 - `string.format("%x", f2b(x))` neexpanduje vícenásobný return, pokud není poslední.
+
+## 7b. Zrychlení hashe (bod 2 plánu)
+
+Cache init je z celkového času 83 %, takže se na něm nic nedělá; zrychloval se
+zbytek (7,2 s → 4,3 s na hash, −39 %), vše s `t_rx` na obou vektorech po každém kroku:
+
+1. `mul64lo` počítá jen spodních 64 bitů (řetěz carry se po limbusech 3 uřízne).
+2. `ad64`/`sb64` bez větvení: `//` je podlahové dělení (0/1/−1), `%` vyjde nezáporné.
+3. `execProgram`: větve seřazené podle naměřené frekvence, `ad64`/`sb64` rozbalené
+   na místě (v `mul64lo` zůstala volaná funkce, volá se mockrát).
+4. **Kompilace superscalar programů**: `compileProg(prog)` přepíše instrukce do
+   řetězce zdrojáku (přímé volání pomocných closures, vše rozbalené, bez dispatch
+   smyčky), zkompiluje `loadstring`em a výsledek si uloží do `prog.fn`. Když
+   `loadstring` chybí nebo narazí na neznámý op, jede se interpreter.
+   `M.noCompile = true` kompilaci vypne (testy i exekutory bez `loadstring`).
+5. 64bitové násobení v kompilovaném kódu: limby po 22 bitech (`a1 = alo // 2^22 +
+   (ahi % 4096) * 1024`, `a2 = ahi // 4096`) — 16bitové limby jsou pomalé, 26bitové
+   přetečou mantisu double (2^53), 22 bitů je největší bezpečná hodnota
+   (`tests/t_mul64.lua`: 68 561 případů, 0 neshod).
 
 ## 8. Bugy nalezené a opravené v poslední fázi
 
@@ -185,14 +212,20 @@ Klíčové konstanty a tvary převzaté z reference (bez nich se port neshoduje)
 19. `nreg.r` se nulovalo jen před prvním chainem → nuluje se v každém chainu.
 20. `registerUsage` se aktualizoval i pro CFROUND, ISTORE a NOP → vyřazeny
     (CFROUND `28`, ISTORE `29`, NOP `30`).
+21. `fprc` se nastavoval jen při načtení modulu, takže se režim zaokrouhlování
+    přenášel mezi hashi a **druhý hash v procesu vycházel jinak** (C reference
+    dává tři hashe za sebou stejné). `tests/t_repeat.lua` to hlídá.
 
 ## 9. Soubory
 
 `scratch/randomx-luau/`
 
 - moduly: `rx.lua`, `blake2b.lua`, `aes.lua`, `argon2.lua`, `superscalar.lua`
-- testy: `t_rx.lua` (oficiální vektory), `t_trace.lua` (per-pc diff), `t_mul.lua`,
-  `t_rcp.lua`, `t_add.lua`, `t_sq.lua`
+- testy: `t_rx.lua` (oficiální vektory), `t_repeat.lua` (čtyři hashe za sebou musí
+  sedět, hlídá únik stavu modulu), `t_mul64.lua` (mul64lo proti referenci),
+  `t_scdiff.lua` (kompilované programy vs. interpreter), `t_compile.lua`
+  (kompilace vs. fallback), `t_trace.lua` (per-pc diff), `t_mul.lua`, `t_rcp.lua`,
+  `t_add.lua`, `t_sq.lua`
 - hash/chain diagnostika: `t_rg.lua`, `t_rg2.lua`, `t_rg8.lua`, `t_rf.lua`, `t_sp.lua`,
   `t_blob.lua`, `t_pc.lua`, `t_dbg.lua`
 - C strana: `trace.cpp` (do klonu `tevador/RandomX`, build `librandomx.a`)
